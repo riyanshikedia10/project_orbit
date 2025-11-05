@@ -1,0 +1,6 @@
+docs/
+.env
+app-env/
+
+# python cache
+__pycache__/
