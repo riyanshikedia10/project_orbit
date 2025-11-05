@@ -5,6 +5,9 @@ streamlit==1.38.0
 pydantic==2.9.2
 python-multipart==0.0.9
 
+# Environment and utilities
+python-dotenv==1.0.1
+
 # Web Scraping (used by src/scraper.py)
 requests==2.32.3
 beautifulsoup4==4.12.3
