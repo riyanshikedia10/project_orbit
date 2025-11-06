@@ -452,31 +452,6 @@ Last Round Name: {company.last_round_name or 'Not disclosed'}
 Last Round Date: {company.last_round_date or 'Not disclosed'}
 Founded Year: {company.founded_year or 'Not disclosed'}
 
-## Business Model and GTM
-
-Not disclosed.
-
-## Funding & Investor Profile
-
-Not disclosed.
-
-## Growth Momentum
-
-Not disclosed.
-
-## Visibility & Market Sentiment
-
-Not disclosed.
-
-## Risks and Challenges
-
-Not disclosed.
-
-## Outlook
-
-Not disclosed.
-
-## Disclosure Gaps
 
 No scraped data found in payload. Expected scraped data at: gs://{os.getenv('GCS_BUCKET_NAME', 'bucket')}/raw/{company_id}/initial_pull/
 Please ensure the scheduler has scraped and uploaded data to GCS bucket."""
@@ -499,20 +474,14 @@ Please ensure the scheduler has scraped and uploaded data to GCS bucket."""
         # Create user prompt with structured payload
         user_prompt = f"""Generate a comprehensive investor-facing diligence dashboard for {request.company_name}.
 
-🚨 CRITICAL: ZERO HALLUCINATION RULE 🚨
-- You MUST use ONLY the data explicitly provided in the Payload JSON below
-- If a field is null, empty array [], or missing → write "Not disclosed"
-- DO NOT use ANY knowledge about {request.company_name} from your training data
-- DO NOT infer, estimate, guess, or make up any information
-- If events array is empty [] → write "Not disclosed" for funding sections
-- If products array is empty [] → write "Not disclosed" for products
-- If leadership array is empty [] → write "Not disclosed" for leadership
+Use ONLY the information provided in the Payload below. If something is unknown or not disclosed, literally say "Not disclosed."
 
-🚨 CRITICAL: If Payload shows empty arrays [] → ALL sections must say "Not disclosed"
-🚨 CRITICAL: DO NOT use training data knowledge about {request.company_name}
-🚨 CRITICAL: Only use data explicitly present in the Payload JSON
+If a claim is marketing, attribute it: "The company states ..."
 
-Structured Payload (from GCS bucket scraped data):
+Never include personal emails or phone numbers.
+
+Always include the final section "## Disclosure Gaps".
+Payload:
 {payload_json}
 
 IMPORTANT: You MUST include all 8 sections in this exact order:
@@ -526,7 +495,6 @@ IMPORTANT: You MUST include all 8 sections in this exact order:
 8. ## Disclosure Gaps
 
 Do not include any sections beyond these 8. If you cannot find information for a section, write "Not disclosed." for that section."""
-
         # Call LLM with retry logic (same as RAG)
         max_retries = 3
         dashboard = None
