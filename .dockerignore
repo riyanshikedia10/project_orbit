@@ -21,6 +21,7 @@ data/raw/*
 !data/raw/.gitkeep
 *.csv
 *.json.bak
+config/
 
 # Airflow
 airflow.db

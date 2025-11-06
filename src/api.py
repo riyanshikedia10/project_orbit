@@ -12,6 +12,9 @@ from google.oauth2 import service_account
 from rag_pipeline import generate_dashboard, retrieve_context, load_system_prompt
 from openai import OpenAI
 from services.embeddings import Embeddings
+from structured_extraction import extract_company_payload
+from urllib.parse import urlparse
+
 
 dotenv.load_dotenv()
 
@@ -202,6 +205,48 @@ def load_companies_from_gcs() -> List[Dict]:
                 status_code=500,
                 detail=f"Failed to load companies from GCS: {str(e)}"
             )
+def get_company_id_from_name(company_name: str) -> str:
+    """Get company_id from company name by looking up website"""
+    try:
+        # Load companies (same logic as get_companies endpoint)
+        if os.getenv("GCS_BUCKET_NAME"):
+            companies = load_companies_from_gcs()
+        else:
+            companies = load_companies()
+        
+        # Find company by name (case-insensitive)
+        company = None
+        for c in companies:
+            if c.get("company_name", "").lower() == company_name.lower():
+                company = c
+                break
+        
+        if not company:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Company '{company_name}' not found in seed file"
+            )
+        
+        # Extract company_id from website domain
+        website = company.get("website", "")
+        if not website:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Company '{company_name}' has no website URL"
+            )
+        
+        domain = urlparse(website).netloc
+        company_id = domain.replace("www.", "").split(".")[0]
+        return company_id.lower()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get company_id: {str(e)}"
+        )
+
 
 # ============================================================================
 # API Endpoints
@@ -216,6 +261,7 @@ async def root():
         "endpoints": {
             "companies": "/companies",
             "dashboard_rag": "/dashboard/rag",
+            "dashboard_structured": "/dashboard/structured",
         }
     }
 
@@ -265,6 +311,123 @@ async def generate_rag_dashboard(request: CompanyRequest):
         )
 
 
+# Structured dashboard generation endpoint
+@app.post("/dashboard/structured", response_model=DashboardResponse, tags=["Dashboard"])
+async def generate_structured_dashboard(request: CompanyRequest):
+    """
+    Generate an investor-facing diligence dashboard using structured extraction pipeline.
+    
+    This endpoint:
+    - Extracts structured data from scraped company website data
+    - Uses Pydantic models for validation (zero hallucination)
+    - Calls LLM with structured payload to generate dashboard
+    - Returns markdown dashboard with all 8 required sections
+    
+    The dashboard is generated from structured data extracted from scraped files.
+    """
+    try:
+        print(f"Generating structured dashboard for {request.company_name}")
+        
+        # Step 1: Get company_id from company_name
+        company_id = get_company_id_from_name(request.company_name)
+        print(f"Company ID: {company_id}")
+        
+        # Step 2: Extract structured payload
+        print("Extracting structured payload...")
+        payload = extract_company_payload(company_id)
+        
+        # Step 3: Convert payload to JSON for LLM
+        payload_json = json.dumps(payload.model_dump(), indent=2, default=str)
+        
+        # Step 4: Load system prompt (same as RAG)
+        system_prompt = load_system_prompt()
+        
+        # Step 5: Create user prompt with structured payload
+        user_prompt = f"""Generate a comprehensive investor-facing diligence dashboard for {request.company_name}.
+
+Use ONLY the structured data provided in the payload below. If something is unknown or not disclosed, literally say "Not disclosed."
+
+Structured Payload:
+{payload_json}
+
+IMPORTANT: You MUST include all 8 sections in this exact order:
+1. ## Company Overview
+2. ## Business Model and GTM
+3. ## Funding & Investor Profile
+4. ## Growth Momentum
+5. ## Visibility & Market Sentiment
+6. ## Risks and Challenges
+7. ## Outlook
+8. ## Disclosure Gaps
+
+Do not include any sections beyond these 8. If you cannot find information for a section, write "Not disclosed." for that section."""
+        
+        # Step 6: Call LLM with retry logic (same as RAG)
+        max_retries = 3
+        dashboard = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = openai_client.chat.completions.create(
+                    model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=4000
+                )
+                
+                dashboard = response.choices[0].message.content
+                
+                # Validate that all required sections are present
+                required_sections = [
+                    "## Company Overview",
+                    "## Business Model and GTM",
+                    "## Funding & Investor Profile",
+                    "## Growth Momentum",
+                    "## Visibility & Market Sentiment",
+                    "## Risks and Challenges",
+                    "## Outlook",
+                    "## Disclosure Gaps"
+                ]
+                
+                missing_sections = []
+                for section in required_sections:
+                    if section not in dashboard:
+                        missing_sections.append(section)
+                
+                if missing_sections:
+                    # If sections are missing, add them with "Not disclosed."
+                    dashboard += "\n\n"
+                    for section in missing_sections:
+                        dashboard += f"\n{section}\n\nNot disclosed.\n"
+                
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise Exception(f"Failed to generate dashboard after {max_retries} attempts: {str(e)}")
+                continue
+        
+        if not dashboard:
+            raise Exception("Failed to generate dashboard")
+        
+        print(f"Dashboard generated successfully for {request.company_name}")
+        
+        return DashboardResponse(
+            company_name=request.company_name,
+            dashboard=dashboard,
+            pipeline_type="structured"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate structured dashboard: {str(e)}"
+        )
 # ============================================================================
 # Health Check
 # ============================================================================
