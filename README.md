@@ -91,15 +91,7 @@ cd cloud_functions
 functions-framework --target=main_full_ingest --debug
 ```
 
-## Labs Progress
 
-- ✅ Lab 0: Project bootstrap & seed data
-- ✅ Lab 1: Scraper implementation
-- ✅ Lab 2: Full-load Cloud Function
-- ✅ Lab 3: Daily refresh Cloud Function
-- ⏳ Lab 4+: Vector DB, RAG, Structured extraction (coming next)
-
-## Architecture
 
 - **Cloud Scheduler** → Triggers Cloud Functions via HTTP (cron)
 - **Cloud Functions** → Scrape companies and upload to GCS
@@ -107,18 +99,20 @@ functions-framework --target=main_full_ingest --debug
 
 ## 🏗️ Architecture
 
+![Architecture](./assets/architecture.jpeg)
+
 ### Two Parallel Generation Pipelines
 
 #### 1. **RAG Pipeline** (Unstructured)
 ```
 Raw Website Data → Text Chunks → Embeddings → Pinecone Vector DB → LLM → PE Dashboard
 ```
-
+![Architecture](./assets/rag_pipeline.jpeg)
 #### 2. **Structured Pipeline** (Pydantic + Instructor)
 ```
 Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 ```
-
+![Structured Pipeline](./assets/structured_pipeline.jpeg)
 ### System Components
 
 - **Data Ingestion**: Cloud Functions scrape Forbes AI 50 company websites
@@ -130,33 +124,8 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 
 ### Data Flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Seed File (GCS)                              │
-│         gs://bucket/seed/forbes_ai50_seed.json                  │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Cloud Functions Orchestration                      │
-└───┬───────────────────────────────────────────────────────────┬─┘
-    │                                                            │
-    ├──────────────────────┐                                   │
-    │                      │                                    │
-    ▼                      ▼                                    ▼
-┌─────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│ Pipeline 1  │  │   Pipeline 2      │  │   Pipeline 3         │
-│ Scraping    │  │   RAG Indexing    │  │   Structured Extract │
-└─────────────┘  └──────────────────┘  └──────────────────────┘
-    │                      │                                    │
-    ▼                      ▼                                    ▼
-┌─────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│ GCS: raw/   │  │   Pinecone       │  │   GCS: structured/   │
-│ HTML + TXT  │  │   Vector DB      │  │   GCS: payloads/     │
-└─────────────┘  └──────────────────┘  └──────────────────────┘
-```
+![Data Flow](./assets/data_flow.png)
 
----
 
 ## 🛠️ Tech Stack
 
@@ -184,7 +153,7 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
 ### System Requirements
 - Python 3.11+
@@ -271,7 +240,7 @@ docker-compose up --build
 
 ---
 
-## 📊 API Endpoints
+## API Endpoints
 
 ### FastAPI Endpoints
 
@@ -296,7 +265,7 @@ Both pipelines generate dashboards with 8 required sections:
 
 ---
 
-## 🚀 Deployment
+## Deployment
 
 ### Automated GCP Deployment
 
@@ -342,7 +311,7 @@ This script:
 
 ---
 
-## 🔍 Monitoring & Debugging
+## Monitoring & Debugging
 
 ### Cloud Functions Logs
 ```bash
@@ -371,7 +340,7 @@ gsutil cat gs://your-bucket/structured/{company_id}.json | python3 -m json.tool
 
 ---
 
-## 📈 Evaluation & Quality Assurance
+## Evaluation & Quality Assurance
 
 The project includes comprehensive evaluation of both pipelines:
 
