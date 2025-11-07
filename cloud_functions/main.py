@@ -600,6 +600,199 @@ def scrape_and_index(request):
         return jsonify({'error': str(e)}), 500
 
 
+@http
+def structured_extraction(request):
+    """
+    Cloud Function: Extract structured data from scraped HTML/TXT files.
+    Supports batch processing to avoid timeout issues.
+    
+    Triggered by: HTTP request (manual or Cloud Scheduler)
+    Query Parameters:
+        - start: Start index (default: 0)
+        - end: End index (default: None, processes all)
+        - batch_size: Number of companies per batch (default: 3)
+        - batch_index: Batch number (alternative to start/end)
+    
+    Process:
+    1. Load companies from GCS seed file
+    2. Determine batch range from parameters
+    3. For each company:
+       - Load scraped files from GCS (raw/{company_id}/initial_pull/)
+       - Run structured extraction using Pydantic + Instructor
+       - Save structured data to structured/{company_id}.json
+       - Save payload to payloads/{company_id}.json
+    4. Aggregate and save results
+    
+    Args:
+        request: Flask request object
+        
+    Returns:
+        JSON response with status
+    """
+    if request.method != 'POST':
+        return jsonify({'error': 'Only POST method allowed'}), 405
+    
+    try:
+        # Get batch parameters from query string or request body
+        start = int(request.args.get('start', 0))
+        end = request.args.get('end')
+        batch_size = int(request.args.get('batch_size', 3))
+        batch_index = request.args.get('batch_index')
+        
+        # If batch_index is provided, calculate start position
+        if batch_index is not None:
+            start = int(batch_index) * batch_size
+        
+        # Calculate end if batch_size is provided and end is not explicitly set
+        if end is None:
+            end = start + batch_size
+        else:
+            end = int(end)
+        
+        logger.info(f"Starting structured extraction process (batch: start={start}, end={end}, batch_size={batch_size})")
+        
+        # Load companies from GCS
+        companies_data = load_json_from_gcs(BUCKET_NAME, SEED_FILE_PATH)
+        if not companies_data:
+            return jsonify({'error': 'Failed to load seed file'}), 500
+        
+        total_companies = len(companies_data)
+        
+        # Validate batch range
+        if start < 0 or start >= total_companies:
+            return jsonify({'error': f'Invalid start index: {start}. Total companies: {total_companies}'}), 400
+        
+        if end > total_companies:
+            end = total_companies
+        
+        if start >= end:
+            return jsonify({'error': f'Invalid range: start ({start}) >= end ({end})'}), 400
+        
+        # Add company_id if not present
+        from urllib.parse import urlparse
+        for company in companies_data:
+            if 'company_id' not in company:
+                domain = urlparse(company['website']).netloc
+                company['company_id'] = domain.replace("www.", "").split(".")[0]
+        
+        # Slice companies for batch processing
+        companies_batch = companies_data[start:end]
+        batch_number = start // batch_size + 1 if batch_size > 0 else 1
+        
+        logger.info(f"Loaded {total_companies} total companies")
+        logger.info(f"Processing batch {batch_number}: companies {start} to {end-1} ({len(companies_batch)} companies)")
+        
+        # Import structured extraction module
+        try:
+            from structured_extraction import extract_company_payload
+            logger.info("Successfully imported structured extraction module")
+        except ImportError as e:
+            logger.error(f"Failed to import structured extraction module: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Failed to import structured extraction module: {str(e)}'}), 500
+        
+        # Process each company in the batch
+        results = []
+        total_events = 0
+        total_products = 0
+        total_leadership = 0
+        
+        for company in companies_batch:
+            company_id = company.get('company_id')
+            company_name = company.get('company_name', 'Unknown')
+            
+            try:
+                logger.info(f"Processing {company_name} ({company_id})...")
+                
+                # Run structured extraction
+                payload = extract_company_payload(company_id)
+                
+                # Count extracted entities
+                events_count = len(payload.events)
+                products_count = len(payload.products)
+                leadership_count = len(payload.leadership)
+                
+                total_events += events_count
+                total_products += products_count
+                total_leadership += leadership_count
+                
+                logger.info(f"  ✅ Completed {company_name}: {events_count} events, {products_count} products, {leadership_count} leadership")
+                
+                results.append({
+                    'company_name': company_name,
+                    'company_id': company_id,
+                    'status': 'success',
+                    'events_extracted': events_count,
+                    'products_extracted': products_count,
+                    'leadership_extracted': leadership_count,
+                    'structured_data_path': f"structured/{company_id}.json",
+                    'payload_path': f"payloads/{company_id}.json"
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing {company_name}: {e}")
+                logger.error(traceback.format_exc())
+                results.append({
+                    'company_name': company_name,
+                    'company_id': company_id,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        # Aggregate results
+        successful = [r for r in results if r.get('status') == 'success']
+        failed = [r for r in results if r.get('status') != 'success']
+        
+        summary = {
+            'extraction_date': datetime.now().isoformat(),
+            'extractor_version': '1.0-structured-extraction-batch',
+            'batch_info': {
+                'batch_number': batch_number,
+                'batch_start': start,
+                'batch_end': end,
+                'batch_size': len(companies_batch),
+                'total_companies': total_companies
+            },
+            'total_companies': len(results),
+            'successful': len(successful),
+            'failed': len(failed),
+            'total_events_extracted': total_events,
+            'total_products_extracted': total_products,
+            'total_leadership_extracted': total_leadership,
+            'companies': results
+        }
+        
+        # Save results to GCS with batch number
+        results_path = f"{RESULTS_PREFIX}structured_extraction_results_batch_{batch_number}.json"
+        save_json_to_gcs(BUCKET_NAME, summary, results_path)
+        
+        logger.info(f"Batch {batch_number} completed: {len(successful)}/{len(results)} companies successful")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Batch {batch_number} completed: Processed {len(successful)}/{len(results)} companies',
+            'batch_info': {
+                'batch_number': batch_number,
+                'batch_start': start,
+                'batch_end': end,
+                'total_companies': total_companies
+            },
+            'summary': {
+                'successful': len(successful),
+                'failed': len(failed),
+                'total_events': total_events,
+                'total_products': total_products,
+                'total_leadership': total_leadership,
+                'total_companies_in_batch': len(results)
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in structured_extraction: {e}", exc_info=True)
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
 # Entry points for Cloud Functions
 def main_full_ingest(request):
     """Entry point for full-load function"""
@@ -614,4 +807,9 @@ def main_daily_refresh(request):
 def main_scrape_and_index(request):
     """Entry point for scrape-and-index function"""
     return scrape_and_index(request)
+
+
+def main_structured_extraction(request):
+    """Entry point for structured extraction function"""
+    return structured_extraction(request)
 
