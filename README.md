@@ -9,7 +9,7 @@ Automating Private-Equity (PE) Intelligence for the Forbes AI 50
 - [Backend URL](https://project-orbit-api-267172092995.us-central1.run.app/)
 - [Scheduler URL](https://us-central1-project-orbit123.cloudfunctions.net/)
 - [Codelabs URL](https://docs.google.com/document/d/1nvzLvddrQmxCtXDee4xZZm30JXYEZF9SzeFhKeGppAM/edit?tab=t.ohf526kuil8m)
-- Video Link: 
+- [Video Link]:(https://drive.google.com/drive/folders/1uC8_yFrUPNdrogmC9K39u_j6KXZdEiel) 
 
 ## Problem Statement
 
