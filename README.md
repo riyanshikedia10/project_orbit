@@ -1,16 +1,15 @@
-# Project Orbit 🚀
+# Project ORBIT - Private Equity Intelligence for Forbes AI 50
+
+Automating Private-Equity (PE) Intelligence for the Forbes AI 50
+
+**Project ORBIT** is a comprehensive, cloud-hosted system that automates private-equity intelligence gathering and analysis for the Forbes AI 50 startups. The platform scrapes public data from company websites, processes it through two parallel generation pipelines (RAG and structured extraction), and serves investor-style diligence dashboards through a modern web interface.
+
 
 Application URL: https://project-orbit-streamlit-267172092995.us-central1.run.app/
 Backend URL: https://project-orbit-api-267172092995.us-central1.run.app/
 Scheduler URL: https://us-central1-project-orbit123.cloudfunctions.net/
 Codelabs URL: 
 Video Link: 
-
-## Automating Private-Equity (PE) Intelligence for the Forbes AI 50
-
-**Project ORBIT** is a comprehensive, cloud-hosted system that automates private-equity intelligence gathering and analysis for the Forbes AI 50 startups. The platform scrapes public data from company websites, processes it through two parallel generation pipelines (RAG and structured extraction), and serves investor-style diligence dashboards through a modern web interface.
-
----
 
 ## 🎯 Problem Statement
 
@@ -20,11 +19,87 @@ Private equity analysts currently perform manual research on Forbes AI 50 compan
 - Creates inconsistency across analysts
 - Is time-consuming and error-prone
 
+**Project ORBIT** solves this by automating the entire intelligence pipeline from data ingestion to dashboard generation.## 🎯 Problem Statement
+
+Private equity analysts currently perform manual research on Forbes AI 50 companies by visiting websites, LinkedIn pages, and press releases to collect investment signals. This process:
+- Doesn't scale to all 50 companies
+- Is difficult to refresh daily
+- Creates inconsistency across analysts
+- Is time-consuming and error-prone
+
 **Project ORBIT** solves this by automating the entire intelligence pipeline from data ingestion to dashboard generation.
 
----
+## Project Structure
+
+```
+project_orbit/
+├── cloud_functions/        # Cloud Functions (Lab 2 & 3 - Scraping automation)
+│   ├── main.py            # Function entry points
+│   ├── requirements.txt   # Function dependencies
+│   └── src/               # Scraper and GCS utilities
+├── dags/                  # DEPRECATED: Old Airflow DAGs (kept for reference)
+├── src/                   # Source code (scraper, RAG, API, etc.)
+├── data/                  # Data files (seed JSON, scraped data)
+├── scripts/               # Setup and deployment scripts
+└── notebooks/             # Jupyter notebooks for development
+```
+
+## Quick Start
+
+### Lab 2 & 3: Cloud Functions + Cloud Scheduler
+
+For detailed setup instructions, see [QUICK_START_FUNCTIONS.md](QUICK_START_FUNCTIONS.md) or [CLOUD_FUNCTIONS_SETUP.md](CLOUD_FUNCTIONS_SETUP.md)
+
+**Quick steps:**
+1. Enable APIs: `bash scripts/enable_apis.sh`
+2. Copy source code: `cp -r src cloud_functions/src`
+3. Set bucket config: `echo 'BUCKET_NAME="project-orbit-data-12345"' > .gcs_config`
+4. Deploy functions: `bash scripts/deploy_functions.sh`
+5. Create schedulers: `bash scripts/create_schedulers.sh`
+
+## Functions
+
+- **full_ingest**: Full-load scraping for all 50 companies (manual trigger)
+- **daily_refresh**: Daily refresh of key pages (runs at 3 AM UTC)
+
+## Requirements
+
+- `requirements.txt` - For local development (FastAPI, Streamlit, etc.)
+- `cloud_functions/requirements.txt` - For Cloud Functions deployment
+
+## Development
+
+### Local Testing
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Test scraper locally
+python src/scraper.py --companies anthropic abridge
+```
+
+### Test Cloud Functions Locally
+```bash
+# Install functions framework
+pip install functions-framework
+
+# Run function locally
+cd cloud_functions
+functions-framework --target=main_full_ingest --debug
+```
+
+
+
+- **Cloud Scheduler** → Triggers Cloud Functions via HTTP (cron)
+- **Cloud Functions** → Scrape companies and upload to GCS
+- **Cloud Storage** → Stores scraped data (`project-orbit-data-12345`)
 
 ## 🏗️ Architecture
+
+![Architecture](./assets/architecture.jpeg)
 
 ### Two Parallel Generation Pipelines
 
@@ -32,12 +107,12 @@ Private equity analysts currently perform manual research on Forbes AI 50 compan
 ```
 Raw Website Data → Text Chunks → Embeddings → Pinecone Vector DB → LLM → PE Dashboard
 ```
-
+![Architecture](./assets/rag_pipeline.jpeg)
 #### 2. **Structured Pipeline** (Pydantic + Instructor)
 ```
 Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 ```
-
+![Structured Pipeline](./assets/structured_pipeline.jpeg)
 ### System Components
 
 - **Data Ingestion**: Cloud Functions scrape Forbes AI 50 company websites
@@ -49,33 +124,8 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 
 ### Data Flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Seed File (GCS)                              │
-│         gs://bucket/seed/forbes_ai50_seed.json                  │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Cloud Functions Orchestration                      │
-└───┬───────────────────────────────────────────────────────────┬─┘
-    │                                                            │
-    ├──────────────────────┐                                   │
-    │                      │                                    │
-    ▼                      ▼                                    ▼
-┌─────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│ Pipeline 1  │  │   Pipeline 2      │  │   Pipeline 3         │
-│ Scraping    │  │   RAG Indexing    │  │   Structured Extract │
-└─────────────┘  └──────────────────┘  └──────────────────────┘
-    │                      │                                    │
-    ▼                      ▼                                    ▼
-┌─────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│ GCS: raw/   │  │   Pinecone       │  │   GCS: structured/   │
-│ HTML + TXT  │  │   Vector DB      │  │   GCS: payloads/     │
-└─────────────┘  └──────────────────┘  └──────────────────────┘
-```
+![Data Flow](./assets/data_flow.png)
 
----
 
 ## 🛠️ Tech Stack
 
@@ -103,7 +153,7 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
 ### System Requirements
 - Python 3.11+
@@ -148,7 +198,7 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Clone & Setup
 ```bash
@@ -190,7 +240,7 @@ docker-compose up --build
 
 ---
 
-## 📊 API Endpoints
+## API Endpoints
 
 ### FastAPI Endpoints
 
@@ -215,92 +265,7 @@ Both pipelines generate dashboards with 8 required sections:
 
 ---
 
-## 🔄 Data Pipelines
-
-### Cloud Functions
-
-The system uses 4 Cloud Functions for data processing:
-
-1. **`full_ingest`** - Initial scraping of all Forbes AI 50 companies
-2. **`daily_refresh`** - Daily incremental updates for changed pages
-3. **`scrape_and_index`** - Combined scraping + RAG indexing pipeline
-4. **`structured_extraction`** - Structured data extraction with Pydantic models
-
-### Airflow DAGs
-
-Two DAGs orchestrate the data pipelines:
-
-1. **`ai50_full_ingest_dag.py`** - One-time full load (`@once` schedule)
-2. **`ai50_daily_refresh_dag.py`** - Daily refresh (`0 3 * * *` schedule)
-
-### Usage Examples
-
-#### Full Ingest (All Companies)
-```bash
-curl -X POST "https://full-ingest-{hash}-uc.a.run.app"
-```
-
-#### Scrape and Index (Batch Processing)
-```bash
-# Process companies 0-3
-curl -X POST "https://scrape-and-index-{hash}-uc.a.run.app?start=0&end=3"
-
-# Process single company
-curl -X POST "https://scrape-and-index-{hash}-uc.a.run.app?start=0&batch_size=1"
-```
-
-#### Generate Dashboard
-```bash
-curl -X POST "http://localhost:8000/dashboard/rag" \
-  -H "Content-Type: application/json" \
-  -d '{"company_name": "Anthropic"}'
-```
-
----
-
-## 📁 Project Structure
-
-```
-project_orbit/
-├── src/
-│   ├── api.py                    # FastAPI application
-│   ├── streamlit_app.py          # Streamlit frontend
-│   ├── scraper.py                # Web scraping utilities
-│   ├── rag_pipeline.py           # RAG pipeline logic
-│   ├── handle_chunking.py        # Text chunking utilities
-│   ├── services/
-│   │   ├── embeddings.py         # OpenAI embeddings + Pinecone
-│   │   ├── chunker.py           # Text chunking service
-│   │   └── __init__.py
-│   └── prompts/
-│       └── dashboard_system.md   # LLM prompt templates
-├── dags/
-│   ├── ai50_full_ingest_dag.py   # Full load Airflow DAG
-│   └── ai50_daily_refresh_dag.py # Daily refresh DAG
-├── data/
-│   ├── forbes_ai50_seed.json     # Company seed data
-│   └── raw/                      # Scraped data (local dev)
-├── config/
-│   └── gcp.json                  # GCP service account (local dev)
-├── scripts/
-│   ├── deploy_functions.sh       # Cloud Functions deployment
-│   ├── run_batch_scrape_index.sh # Batch processing scripts
-│   └── run_batch_structured_extraction.sh
-├── docs/
-│   ├── fastapi.md                # FastAPI setup guide
-│   ├── gcp_deployment_guide.md   # GCP deployment guide
-│   ├── CLOUD_FUNCTIONS_DOCUMENTATION.md # Cloud Functions guide
-│   └── ...
-├── requirements.txt              # Python dependencies
-├── Dockerfile                    # Container build instructions
-├── docker-compose.yml           # Multi-container setup
-├── deploy_gcp.sh                # GCP deployment script
-└── README.md
-```
-
----
-
-## 🚀 Deployment
+## Deployment
 
 ### Automated GCP Deployment
 
@@ -346,7 +311,7 @@ This script:
 
 ---
 
-## 🔍 Monitoring & Debugging
+## Monitoring & Debugging
 
 ### Cloud Functions Logs
 ```bash
@@ -375,7 +340,7 @@ gsutil cat gs://your-bucket/structured/{company_id}.json | python3 -m json.tool
 
 ---
 
-## 📈 Evaluation & Quality Assurance
+## Evaluation & Quality Assurance
 
 The project includes comprehensive evaluation of both pipelines:
 
