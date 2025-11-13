@@ -17,6 +17,12 @@ from .models import (
     RiskSignal,
     SignalReportResponse,
 )
+from .supervisor import SupervisorAgent
+from .react_models import (
+    ReActStep,
+    ReActTrace,
+    ActionType,
+)
 
 __all__ = [
     # Tools
@@ -29,5 +35,11 @@ __all__ = [
     "RAGContextItem",
     "RiskSignal",
     "SignalReportResponse",
+    # Supervisor Agent
+    "SupervisorAgent",
+    # ReAct Models
+    "ReActStep",
+    "ReActTrace",
+    "ActionType",
 ]
 
