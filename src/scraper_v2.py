@@ -69,6 +69,22 @@ except ImportError:
 SCRAPER_VERSION = "5.0-enterprise-ats"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+# Page patterns - All 12 page types from scraper.py
+PAGE_PATTERNS = {
+    "homepage": ["/"],
+    "about": ["/about", "/company", "/about-us", "/who-we-are", "/our-story"],
+    "product": ["/product", "/products", "/platform", "/solutions", "/features"],
+    "careers": ["/careers", "/jobs", "/join-us", "/work-with-us"],
+    "blog": ["/blog", "/news", "/press", "/newsroom", "/insights", "/resources"],
+    "team": ["/team", "/leadership", "/about/team", "/about/leadership", "/people", "/our-team"],
+    "investors": ["/investors", "/funding", "/about/investors", "/backed-by", "/backers"],
+    "customers": ["/customers", "/case-studies", "/success-stories", "/testimonials", "/customer-stories"],
+    "press": ["/press", "/newsroom", "/media", "/news-and-press", "/press-releases"],
+    "pricing": ["/pricing", "/plans", "/price", "/buy", "/purchase"],
+    "partners": ["/partners", "/integrations", "/ecosystem", "/partner", "/integration"],
+    "contact": ["/contact", "/contact-us", "/get-in-touch", "/reach-us"]
+}
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -1067,6 +1083,45 @@ def dedupe_by_field(items: List[Dict[str, Any]], field: str) -> List[Dict[str, A
 # COMPREHENSIVE PAGE EXTRACTION
 # ============================================================================
 
+def detect_page_error(html: str, text_content: str = None) -> Optional[str]:
+    """Detect if a page contains an error message"""
+    if text_content is None:
+        # Quick extraction for error detection
+        soup = BeautifulSoup(html, 'lxml')
+        text_content = soup.get_text(separator=' ', strip=True)
+    
+    text_lower = text_content.lower()
+    
+    # Common error patterns
+    error_patterns = [
+        "application error",
+        "client-side exception",
+        "something went wrong",
+        "an error occurred",
+        "error loading page",
+        "page not found",
+        "404 error",
+        "500 error",
+        "internal server error",
+        "this page isn't working",
+        "this site can't be reached",
+        "network error",
+        "loading error",
+        "failed to load",
+        "error occurred while rendering"
+    ]
+    
+    for pattern in error_patterns:
+        if pattern in text_lower:
+            return pattern
+    
+    # Check for very short content that might indicate an error
+    if len(text_content.strip()) < 50 and any(err in html.lower() for err in ["error", "exception", "failed"]):
+        return "suspected_error_short_content"
+    
+    return None
+
+
 def extract_complete_page_data(html: str, url: str) -> Dict[str, Any]:
     """Extract ALL data from a page"""
     
@@ -1091,8 +1146,14 @@ def extract_complete_page_data(html: str, url: str) -> Dict[str, Any]:
             "total_forms": 0,
             "total_tables": 0,
             "word_count": 0
-        }
+        },
+        "error_detected": None
     }
+    
+    # Detect errors
+    error_type = detect_page_error(html, page_data["text_content"]["full_text"])
+    if error_type:
+        page_data["error_detected"] = error_type
     
     # Calculate statistics
     page_data["statistics"]["total_links"] = len(page_data["links"])
@@ -1126,26 +1187,33 @@ class ComprehensiveCrawler:
         self.urls_visited = set()
         self.priority_urls: Set[str] = set()
         self.urls_to_visit: Set[str] = {self.base_url}
+        
+        # Discovered page URLs for all 12 page types
+        self.discovered_pages: Dict[str, Optional[str]] = {
+            "homepage": self.base_url,
+            "about": None,
+            "product": None,
+            "careers": None,
+            "blog": None,
+            "team": None,
+            "investors": None,
+            "customers": None,
+            "press": None,
+            "pricing": None,
+            "partners": None,
+            "contact": None
+        }
+        
+        # Add blog indexes from profile
         for blog_index in self.profile.blog_indexes:
             if is_same_domain(blog_index, self.base_url):
                 self.urls_to_visit.add(blog_index)
                 self.priority_urls.add(blog_index)
+                if not self.discovered_pages["blog"]:
+                    self.discovered_pages["blog"] = blog_index
 
-        # Ensure high-value about/team pages are crawled even if not linked
-        default_about_paths = [
-            "/about",
-            "/about-us",
-            "/company/about",
-            "/company",
-            "/team",
-            "/leadership",
-            "/company/leadership"
-        ]
-        for about_path in default_about_paths:
-            about_url = urljoin(self.base_url + "/", about_path.lstrip("/"))
-            if is_same_domain(about_url, self.base_url):
-                self.urls_to_visit.add(about_url)
-                self.priority_urls.add(about_url)
+        # Try to find all 12 page types using patterns
+        self._discover_all_page_types()
 
         self.max_pages = max_pages
         self.preloaded_jobs: List[Dict[str, Any]] = []
@@ -1155,6 +1223,152 @@ class ComprehensiveCrawler:
         logger.info(f"🕷️  Comprehensive Scraper: {self.company_name}")
         logger.info(f"🌐 URL: {self.base_url}")
         logger.info("=" * 80)
+    
+    def _find_page_url(self, page_type: str) -> Optional[str]:
+        """Find URL for a page type by trying multiple patterns (like scraper.py)"""
+        patterns = PAGE_PATTERNS.get(page_type, [])
+        for pattern in patterns:
+            url = urljoin(self.base_url, pattern)
+            try:
+                response = requests.head(url, timeout=5, headers={"User-Agent": USER_AGENT}, allow_redirects=True)
+                if response.status_code == 200:
+                    return response.url
+            except:
+                continue
+        return None
+    
+    def _discover_links_from_homepage(self, homepage_html: str) -> Dict[str, str]:
+        """Discover page URLs by analyzing homepage links for all 12 page types (from scraper.py)"""
+        discovered = {}
+        try:
+            soup = BeautifulSoup(homepage_html, 'lxml')
+            parsed_base = urlparse(self.base_url)
+            
+            # Get all links
+            for link in soup.find_all('a', href=True):
+                href = link['href'].lower()
+                full_url = urljoin(self.base_url, link['href'])
+                
+                # Only consider links from same domain
+                if urlparse(full_url).netloc != parsed_base.netloc:
+                    continue
+                
+                link_text = link.get_text().lower().strip()
+                
+                # Match all 12 page types based on URL or link text
+                
+                # About
+                if not discovered.get('about'):
+                    if any(x in href for x in ['/about', '/company', '/who-we-are', '/our-story']):
+                        discovered['about'] = full_url
+                    elif any(x in link_text for x in ['about', 'company', 'who we are', 'our story']):
+                        discovered['about'] = full_url
+                
+                # Product
+                if not discovered.get('product'):
+                    if any(x in href for x in ['/product', '/platform', '/solution', '/feature']):
+                        discovered['product'] = full_url
+                    elif any(x in link_text for x in ['product', 'platform', 'solution', 'features']):
+                        discovered['product'] = full_url
+                
+                # Careers
+                if not discovered.get('careers'):
+                    if any(x in href for x in ['/career', '/job', '/join', '/work-with']):
+                        discovered['careers'] = full_url
+                    elif any(x in link_text for x in ['career', 'jobs', 'join us', 'work with']):
+                        discovered['careers'] = full_url
+                
+                # Blog
+                if not discovered.get('blog'):
+                    if any(x in href for x in ['/blog', '/insight', '/resource']):
+                        discovered['blog'] = full_url
+                    elif any(x in link_text for x in ['blog', 'insights', 'resources']):
+                        discovered['blog'] = full_url
+                
+                # Team
+                if not discovered.get('team'):
+                    if any(x in href for x in ['/team', '/leadership', '/people', '/our-team']):
+                        discovered['team'] = full_url
+                    elif any(x in link_text for x in ['team', 'leadership', 'people', 'our team']):
+                        discovered['team'] = full_url
+                
+                # Investors
+                if not discovered.get('investors'):
+                    if any(x in href for x in ['/investor', '/funding', '/backed-by', '/backer']):
+                        discovered['investors'] = full_url
+                    elif any(x in link_text for x in ['investors', 'funding', 'backed by', 'backers']):
+                        discovered['investors'] = full_url
+                
+                # Customers
+                if not discovered.get('customers'):
+                    if any(x in href for x in ['/customer', '/case-stud', '/success-stor', '/testimonial']):
+                        discovered['customers'] = full_url
+                    elif any(x in link_text for x in ['customers', 'case studies', 'success stories', 'testimonials']):
+                        discovered['customers'] = full_url
+                
+                # Press
+                if not discovered.get('press'):
+                    if any(x in href for x in ['/press', '/newsroom', '/media', '/news-and-press']):
+                        discovered['press'] = full_url
+                    elif any(x in link_text for x in ['press', 'newsroom', 'media', 'news']):
+                        discovered['press'] = full_url
+                
+                # Pricing
+                if not discovered.get('pricing'):
+                    if any(x in href for x in ['/pricing', '/plans', '/price', '/buy']):
+                        discovered['pricing'] = full_url
+                    elif any(x in link_text for x in ['pricing', 'plans', 'price', 'buy']):
+                        discovered['pricing'] = full_url
+                
+                # Partners
+                if not discovered.get('partners'):
+                    if any(x in href for x in ['/partner', '/integration', '/ecosystem']):
+                        discovered['partners'] = full_url
+                    elif any(x in link_text for x in ['partners', 'integrations', 'ecosystem']):
+                        discovered['partners'] = full_url
+                
+                # Contact
+                if not discovered.get('contact'):
+                    if any(x in href for x in ['/contact', '/get-in-touch', '/reach-us']):
+                        discovered['contact'] = full_url
+                    elif any(x in link_text for x in ['contact', 'get in touch', 'reach us']):
+                        discovered['contact'] = full_url
+        
+        except Exception as e:
+            logger.debug(f"Link discovery failed: {str(e)[:50]}")
+        
+        return discovered
+    
+    def _discover_all_page_types(self):
+        """Systematically discover all 12 page types using patterns and homepage links"""
+        # First, try to find pages using URL patterns (fast HTTP HEAD requests)
+        for page_type in PAGE_PATTERNS.keys():
+            if page_type == "homepage":
+                continue  # Already set
+            url = self._find_page_url(page_type)
+            if url:
+                self.discovered_pages[page_type] = url
+                self.urls_to_visit.add(url)
+                self.priority_urls.add(url)
+                logger.debug(f"  ✓ Found {page_type} page: {url}")
+        
+        # Then, try to discover from homepage (if we can fetch it quickly)
+        try:
+            response = requests.get(self.base_url, timeout=5, headers={"User-Agent": USER_AGENT})
+            if response.status_code == 200:
+                discovered = self._discover_links_from_homepage(response.text)
+                for page_type, url in discovered.items():
+                    if not self.discovered_pages.get(page_type):
+                        self.discovered_pages[page_type] = url
+                        self.urls_to_visit.add(url)
+                        self.priority_urls.add(url)
+                        logger.debug(f"  ✓ Discovered {page_type} from homepage: {url}")
+        except:
+            pass  # Will discover during crawl
+        
+        # Log discovered pages
+        found_pages = [pt for pt, url in self.discovered_pages.items() if url]
+        logger.info(f"  📋 Discovered {len(found_pages)}/12 page types: {', '.join(found_pages)}")
     
     def discover_urls(self, html: str, current_url: str) -> Set[str]:
         """Discover all URLs from a page, prioritizing jobs and news - FAST VERSION"""
@@ -1225,10 +1439,111 @@ class ComprehensiveCrawler:
         return discovered
 
     async def fetch_priority_content(self, context: BrowserContext) -> None:
-        """Preload high-value pages (careers + news feeds) before broad crawl."""
+        """Preload high-value pages (all 12 page types + careers + news feeds) before broad crawl."""
         # Initialize ATS extractor
         ats_extractor = ATSExtractor(self.base_url)
         news_extractor = NewsExtractor(self.base_url)
+        
+        # FIRST: Crawl all 12 page types systematically (like scraper.py)
+        # Ensure homepage is crawled FIRST to discover more pages
+        logger.info("  🔍 Crawling all 12 page types...")
+        
+        # Sort pages to ensure homepage is first
+        page_types_to_crawl = []
+        if self.discovered_pages.get("homepage"):
+            page_types_to_crawl.append(("homepage", self.discovered_pages["homepage"]))
+        for page_type, page_url in self.discovered_pages.items():
+            if page_type != "homepage" and page_url:
+                page_types_to_crawl.append((page_type, page_url))
+        
+        crawled_page_types = []
+        for page_type, page_url in page_types_to_crawl:
+            # Skip if already visited (but still try if it's a critical page type)
+            if page_url in self.urls_visited and page_type != "homepage":
+                logger.debug(f"  ⏭️  Skipping {page_type} (already visited): {page_url}")
+                continue
+            
+            # Check page limit
+            if len(self.urls_visited) >= self.max_pages:
+                logger.warning(f"  ⚠️  Page limit reached, skipping remaining page types")
+                break
+            
+            try:
+                page = await context.new_page()
+                logger.info(f"  📄 Crawling {page_type} page: {page_url}")
+                await page.goto(page_url, wait_until='domcontentloaded', timeout=15000)
+                await asyncio.sleep(1)  # Brief wait for content
+                html = await page.content()
+                await page.close()
+                
+                # Extract complete page data
+                page_data = extract_complete_page_data(html, page_url)
+                page_data["raw_html"] = html
+                page_data["page_type"] = page_type  # Store page type for later use
+                
+                # Apply structured extraction based on page type
+                if page_type == "investors":
+                    # Extract funding information
+                    investors_data = self._parse_investors_page(html)
+                    if investors_data:
+                        page_data["extracted_investors"] = investors_data
+                        logger.info(f"  💰 Found {len(investors_data)} investor/funding items")
+                elif page_type == "press":
+                    # Extract press releases and funding announcements
+                    press_data = self._parse_press_page(html)
+                    if press_data:
+                        page_data["extracted_press"] = press_data
+                        logger.info(f"  📰 Found {len(press_data)} press releases")
+                elif page_type == "pricing":
+                    # Extract pricing information
+                    pricing_data = self._parse_pricing_page(html)
+                    if pricing_data:
+                        page_data["extracted_pricing"] = pricing_data
+                        logger.info(f"  💵 Found pricing model: {pricing_data.get('pricing_model')}, {len(pricing_data.get('tiers', []))} tiers")
+                elif page_type == "customers":
+                    # Extract customer names
+                    customers_data = self._parse_customers_page(html)
+                    if customers_data:
+                        page_data["extracted_customers"] = customers_data
+                        logger.info(f"  👥 Found {len(customers_data)} customers")
+                elif page_type == "partners":
+                    # Extract partner names
+                    partners_data = self._parse_partners_page(html)
+                    if partners_data:
+                        page_data["extracted_partners"] = partners_data
+                        logger.info(f"  🤝 Found {len(partners_data)} partners")
+                
+                self.pages_data.append(page_data)
+                self.urls_visited.add(page_url)
+                self.priority_urls.discard(page_url)
+                crawled_page_types.append(page_type)
+                
+                # If this is homepage, discover more pages from it
+                if page_type == "homepage":
+                    discovered = self._discover_links_from_homepage(html)
+                    for discovered_type, discovered_url in discovered.items():
+                        if not self.discovered_pages.get(discovered_type):
+                            self.discovered_pages[discovered_type] = discovered_url
+                            self.urls_to_visit.add(discovered_url)
+                            self.priority_urls.add(discovered_url)
+                            logger.info(f"  ➕ Discovered {discovered_type} from homepage: {discovered_url}")
+                
+                # Discover more URLs from this page
+                new_urls = self.discover_urls(html, page_url)
+                for new_url in new_urls:
+                    if is_same_domain(new_url, self.base_url) and new_url not in self.urls_visited:
+                        if len(self.urls_visited) + len(self.urls_to_visit) < self.max_pages:
+                            self.urls_to_visit.add(new_url)
+                
+            except Exception as exc:
+                logger.warning(f"  ⚠️  Failed to crawl {page_type} page ({page_url}): {exc}")
+        
+        logger.info(f"  ✅ Crawled {len(crawled_page_types)}/12 page types: {', '.join(crawled_page_types)}")
+        
+        # Log which page types were NOT found/crawled
+        missing_types = [pt for pt in PAGE_PATTERNS.keys() if pt not in crawled_page_types]
+        if missing_types:
+            logger.warning(f"  ⚠️  Missing page types: {', '.join(missing_types)}")
         
         # Careers pages for jobs - USE ATS EXTRACTION
         # Also check for external ATS domains in iframes
@@ -1263,12 +1578,19 @@ class ComprehensiveCrawler:
             
             # Wait longer for dynamic ATS content to load (especially for Ashby/Workable)
             await asyncio.sleep(3)  # Increased wait time
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            await asyncio.sleep(2)
-            await page.evaluate('window.scrollTo(0, 0)')  # Scroll back up
-            await asyncio.sleep(1)
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')  # Scroll down again
-            await asyncio.sleep(2)
+            try:
+                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await asyncio.sleep(2)
+                await page.evaluate('window.scrollTo(0, 0)')  # Scroll back up
+                await asyncio.sleep(1)
+                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')  # Scroll down again
+                await asyncio.sleep(2)
+            except Exception as scroll_err:
+                # Handle navigation errors gracefully
+                if "Execution context was destroyed" in str(scroll_err) or "Target closed" in str(scroll_err):
+                    logger.debug(f"  ⚠️  Page navigated during ATS scroll, continuing...")
+                else:
+                    logger.debug(f"  ⚠️  ATS scroll error: {scroll_err}")
             
             # Check for iframes with external ATS and extract from them
             iframes = await page.query_selector_all('iframe')
@@ -1303,8 +1625,15 @@ class ComprehensiveCrawler:
                                 logger.debug(f"  ⚠️  Could not navigate to iframe URL: {e2}")
                 except Exception as e:
                     logger.debug(f"  ⚠️  Error checking iframe: {e}")
-            await page.evaluate('window.scrollTo(0, 0)')
-            await asyncio.sleep(1)
+            try:
+                await page.evaluate('window.scrollTo(0, 0)')
+                await asyncio.sleep(1)
+            except Exception as scroll_err:
+                # Handle navigation errors gracefully
+                if "Execution context was destroyed" in str(scroll_err) or "Target closed" in str(scroll_err):
+                    logger.debug(f"  ⚠️  Page navigated during scroll, continuing...")
+                else:
+                    logger.debug(f"  ⚠️  Scroll error: {scroll_err}")
             
             # Try clicking "Load More" or "Show All" buttons multiple times (increased attempts)
             for attempt in range(5):  # Increased from 3 to 5
@@ -1330,6 +1659,36 @@ class ComprehensiveCrawler:
             # ALWAYS use comprehensive extraction as fallback (even if ATS found jobs)
             page_data = extract_complete_page_data(html, careers_url)
             page_data["raw_html"] = html
+            
+            # Check for errors and retry if needed
+            if page_data.get("error_detected"):
+                logger.warning(f"  ⚠️  Error detected ({page_data['error_detected']}) on careers page: {careers_url}")
+                if "client-side" in page_data["error_detected"] or "application error" in page_data["error_detected"]:
+                    logger.info(f"  🔄 Retrying careers page with longer wait...")
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=15000)
+                        await asyncio.sleep(5)  # Longer wait for ATS pages
+                        try:
+                            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                            await asyncio.sleep(2)
+                        except Exception as scroll_err:
+                            # Handle navigation errors gracefully
+                            if "Execution context was destroyed" in str(scroll_err) or "Target closed" in str(scroll_err):
+                                logger.debug(f"  ⚠️  Page navigated during ATS retry scroll, continuing...")
+                            else:
+                                logger.debug(f"  ⚠️  ATS retry scroll error: {scroll_err}")
+                        html = await page.content()
+                        page_data = extract_complete_page_data(html, careers_url)
+                        page_data["raw_html"] = html
+                        if page_data.get("error_detected"):
+                            logger.warning(f"  ❌ Careers page still has error after retry")
+                            page_data["load_failed"] = True
+                        else:
+                            logger.info(f"  ✅ Careers page retry successful")
+                    except Exception as retry_exc:
+                        logger.debug(f"  ⚠️  Careers page retry failed: {retry_exc}")
+                        page_data["load_failed"] = True
+            
             jobs = extract_jobs_from_all_sources(html, careers_url)
             if jobs:
                 # Merge with ATS jobs (deduplicate)
@@ -1595,9 +1954,16 @@ class ComprehensiveCrawler:
             is_priority_page = any(kw in url_lower for kw in ['/career', '/job', '/blog/', '/news/', '/post/', '/article/'])
             
             if is_priority_page:
-                # Quick scroll to load lazy content
-                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                await asyncio.sleep(0.3)
+                # Quick scroll to load lazy content (with error handling for navigation)
+                try:
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await asyncio.sleep(0.3)
+                except Exception as scroll_err:
+                    # Handle navigation errors gracefully
+                    if "Execution context was destroyed" in str(scroll_err) or "Target closed" in str(scroll_err):
+                        logger.debug(f"  ⚠️  Page navigated during scroll, continuing...")
+                    else:
+                        logger.debug(f"  ⚠️  Scroll error: {scroll_err}")
                 
                 # Try clicking "Load More" buttons (only once, fast)
                 try:
@@ -1605,7 +1971,7 @@ class ComprehensiveCrawler:
                     if await load_more.count() > 0:
                         await load_more.click(timeout=1000)
                         await asyncio.sleep(0.3)
-                except:
+                except Exception:
                     pass
             else:
                 # For non-priority pages, minimal wait
@@ -1617,6 +1983,40 @@ class ComprehensiveCrawler:
             # Extract ALL data
             page_data = extract_complete_page_data(html, url)
             page_data["raw_html"] = html  # Store HTML for saving
+            
+            # Check for errors and retry if needed (especially for Next.js/React apps)
+            if page_data.get("error_detected"):
+                logger.warning(f"  ⚠️  Error detected ({page_data['error_detected']}): {url}")
+                # For client-side errors, try waiting longer for JavaScript to render
+                if "client-side" in page_data["error_detected"] or "application error" in page_data["error_detected"]:
+                    logger.info(f"  🔄 Retrying with longer wait for JS rendering...")
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                        await asyncio.sleep(3)  # Additional wait for React/Next.js hydration
+                        try:
+                            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                            await asyncio.sleep(1)
+                        except Exception as scroll_err:
+                            # Handle navigation errors gracefully
+                            if "Execution context was destroyed" in str(scroll_err) or "Target closed" in str(scroll_err):
+                                logger.debug(f"  ⚠️  Page navigated during retry scroll, continuing...")
+                            else:
+                                logger.debug(f"  ⚠️  Retry scroll error: {scroll_err}")
+                        html = await page.content()
+                        page_data = extract_complete_page_data(html, url)
+                        page_data["raw_html"] = html
+                        if page_data.get("error_detected"):
+                            logger.warning(f"  ❌ Still has error after retry, marking as failed: {url}")
+                            # Mark as failed but still save for debugging
+                            page_data["load_failed"] = True
+                        else:
+                            logger.info(f"  ✅ Retry successful, error resolved")
+                    except Exception as retry_exc:
+                        logger.debug(f"  ⚠️  Retry failed: {retry_exc}")
+                        page_data["load_failed"] = True
+                else:
+                    # For other errors, mark as failed
+                    page_data["load_failed"] = True
             
             # Extract jobs if this is a careers/jobs page - USE ATS EXTRACTION
             url_lower = url.lower()
@@ -1650,6 +2050,17 @@ class ComprehensiveCrawler:
             
             # Discover new URLs
             new_urls = self.discover_urls(html, url)
+            
+            # If this is the homepage, also discover page types from links
+            if url.rstrip('/') == self.base_url.rstrip('/'):
+                discovered = self._discover_links_from_homepage(html)
+                for page_type, discovered_url in discovered.items():
+                    if not self.discovered_pages.get(page_type):
+                        self.discovered_pages[page_type] = discovered_url
+                        self.urls_to_visit.add(discovered_url)
+                        self.priority_urls.add(discovered_url)
+                        logger.debug(f"  ✓ Discovered {page_type} from homepage: {discovered_url}")
+            
             for new_url in new_urls:
                 if new_url in self.urls_visited or new_url in self.priority_urls:
                     continue
@@ -1731,7 +2142,19 @@ class ComprehensiveCrawler:
             
             page = await context.new_page()
             
-            # Crawl all discovered URLs
+            # SECOND: Ensure any remaining discovered page types are crawled (in case they weren't in priority)
+            remaining_page_types = []
+            for page_type, page_url in self.discovered_pages.items():
+                if page_url and page_url not in self.urls_visited:
+                    remaining_page_types.append((page_type, page_url))
+                    # Add to priority to ensure they're crawled
+                    self.priority_urls.add(page_url)
+                    self.urls_to_visit.discard(page_url)
+            
+            if remaining_page_types:
+                logger.info(f"  🔍 Ensuring {len(remaining_page_types)} remaining discovered page types are crawled...")
+            
+            # THIRD: Crawl all other discovered URLs (blog posts, job detail pages, etc.)
             while (self.urls_to_visit or self.priority_urls) and len(self.urls_visited) < self.max_pages:
                 if self.priority_urls:
                     url = self.priority_urls.pop()
@@ -1748,6 +2171,46 @@ class ComprehensiveCrawler:
                 # Rate limiting (minimal for speed)
                 await asyncio.sleep(0.2)
             
+            # Final summary of page types extracted
+            extracted_page_types = set()
+            for page_data in self.pages_data:
+                page_type = page_data.get("page_type")
+                if page_type:
+                    extracted_page_types.add(page_type)
+                else:
+                    # Try to infer from URL
+                    url = page_data.get("url", "")
+                    url_lower = url.lower()
+                    if url_lower.rstrip('/') == self.base_url.lower().rstrip('/'):
+                        extracted_page_types.add("homepage")
+                    elif any(kw in url_lower for kw in ['/about', '/company']):
+                        extracted_page_types.add("about")
+                    elif any(kw in url_lower for kw in ['/career', '/job']):
+                        extracted_page_types.add("careers")
+                    elif any(kw in url_lower for kw in ['/blog', '/news']):
+                        extracted_page_types.add("blog")
+                    elif any(kw in url_lower for kw in ['/team', '/leadership']):
+                        extracted_page_types.add("team")
+                    elif any(kw in url_lower for kw in ['/investor', '/funding']):
+                        extracted_page_types.add("investors")
+                    elif any(kw in url_lower for kw in ['/customer', '/client']):
+                        extracted_page_types.add("customers")
+                    elif any(kw in url_lower for kw in ['/press', '/newsroom']):
+                        extracted_page_types.add("press")
+                    elif any(kw in url_lower for kw in ['/pricing', '/plans']):
+                        extracted_page_types.add("pricing")
+                    elif any(kw in url_lower for kw in ['/partner', '/integration']):
+                        extracted_page_types.add("partners")
+                    elif any(kw in url_lower for kw in ['/contact']):
+                        extracted_page_types.add("contact")
+                    elif any(kw in url_lower for kw in ['/product', '/platform']):
+                        extracted_page_types.add("product")
+            
+            logger.info(f"  📊 Final summary: Extracted {len(extracted_page_types)}/12 page types: {', '.join(sorted(extracted_page_types))}")
+            missing_final = [pt for pt in PAGE_PATTERNS.keys() if pt not in extracted_page_types]
+            if missing_final:
+                logger.warning(f"  ⚠️  Page types NOT extracted: {', '.join(missing_final)}")
+            
             await browser.close()
         
         # Save all data
@@ -1762,7 +2225,7 @@ class ComprehensiveCrawler:
         }
     
     def extract_entities_from_data(self) -> Dict[str, Any]:
-        """Extract entities (jobs, team, products, news articles, etc.) from all collected data"""
+        """Extract entities (jobs, team, products, news articles, etc.) from all collected data - COMPREHENSIVE"""
         entities = {
             "jobs": [],
             "team_members": [],
@@ -1775,14 +2238,33 @@ class ComprehensiveCrawler:
             "press_releases": [],
             "news_articles": [],
             "company_info": {
+                "legal_name": None,
+                "brand_name": None,
                 "founded_year": None,
                 "headquarters": None,
+                "hq_city": None,
+                "hq_state": None,
+                "hq_country": None,
                 "description": None,
-                "categories": []
+                "categories": [],
+                "related_companies": []
             },
             "pricing": {
                 "model": None,
                 "tiers": []
+            },
+            "snapshot_data": {
+                "headcount_total": None,
+                "headcount_growth_pct": None,
+                "job_openings_count": None,
+                "engineering_openings": None,
+                "sales_openings": None,
+                "hiring_focus": [],
+                "geo_presence": []
+            },
+            "visibility_data": {
+                "github_stars": None,
+                "glassdoor_rating": None
             }
         }
         
@@ -1880,6 +2362,16 @@ class ComprehensiveCrawler:
                     if not entities["company_info"]["founded_year"] or is_about_page:
                         entities["company_info"]["founded_year"] = company_info_html["founded_year"]
                 
+                # Brand name
+                if company_info_html.get("brand_name"):
+                    if not entities["company_info"]["brand_name"] or is_about_page:
+                        entities["company_info"]["brand_name"] = company_info_html["brand_name"]
+                
+                # Legal name
+                if company_info_html.get("legal_name"):
+                    if not entities["company_info"]["legal_name"] or is_about_page:
+                        entities["company_info"]["legal_name"] = company_info_html["legal_name"]
+                
                 def _invalid_hq(value: Any) -> bool:
                     if not value:
                         return True
@@ -1894,6 +2386,17 @@ class ComprehensiveCrawler:
                     if (not entities["company_info"]["headquarters"] or _invalid_hq(entities["company_info"]["headquarters"]) or is_about_page):
                         entities["company_info"]["headquarters"] = new_hq
                 
+                # HQ city, state, country separately
+                if company_info_html.get("hq_city"):
+                    if not entities["company_info"]["hq_city"] or is_about_page:
+                        entities["company_info"]["hq_city"] = company_info_html["hq_city"]
+                if company_info_html.get("hq_state"):
+                    if not entities["company_info"]["hq_state"] or is_about_page:
+                        entities["company_info"]["hq_state"] = company_info_html["hq_state"]
+                if company_info_html.get("hq_country"):
+                    if not entities["company_info"]["hq_country"] or is_about_page:
+                        entities["company_info"]["hq_country"] = company_info_html["hq_country"]
+                
                 if company_info_html.get("description"):
                     if not entities["company_info"]["description"] or is_about_page:
                         entities["company_info"]["description"] = company_info_html["description"]
@@ -1902,8 +2405,30 @@ class ComprehensiveCrawler:
                     if not isinstance(entities["company_info"]["categories"], list):
                         entities["company_info"]["categories"] = []
                     entities["company_info"]["categories"].extend(company_info_html["categories"])
+                
+                # Related companies
+                if company_info_html.get("related_companies"):
+                    if not isinstance(entities["company_info"]["related_companies"], list):
+                        entities["company_info"]["related_companies"] = []
+                    entities["company_info"]["related_companies"].extend(company_info_html["related_companies"])
             
-            # 4.8. Extract customers/partners from HTML
+            # 4.8. Extract customers/partners from HTML and structured pages
+            if "extracted_customers" in page_data:
+                for customer_name in page_data["extracted_customers"]:
+                    entities["customers"].append({
+                        "name": customer_name,
+                        "source": "customers_page",
+                        "url": page_data["url"]
+                    })
+            
+            if "extracted_partners" in page_data:
+                for partner_name in page_data["extracted_partners"]:
+                    entities["partners"].append({
+                        "name": partner_name,
+                        "source": "partners_page",
+                        "url": page_data["url"]
+                    })
+            
             if html:
                 if any(kw in url_lower for kw in ['/customer', '/client', '/case-study']):
                     customers_html = self._extract_customers_from_html(html, page_data["url"])
@@ -1915,6 +2440,12 @@ class ComprehensiveCrawler:
             # 5. Extract company info from structured data
             for item in page_data["structured_data"]["json_ld"]:
                 if isinstance(item, dict) and item.get("@type") == "Organization":
+                    # Legal name and brand name
+                    if not entities["company_info"]["legal_name"]:
+                        entities["company_info"]["legal_name"] = item.get("legalName")
+                    if not entities["company_info"]["brand_name"]:
+                        entities["company_info"]["brand_name"] = item.get("name")
+                    
                     if not entities["company_info"]["founded_year"]:
                         # Try to extract founded year
                         founding_date = item.get("foundingDate")
@@ -1923,6 +2454,7 @@ class ComprehensiveCrawler:
                             if year_match:
                                 entities["company_info"]["founded_year"] = int(year_match.group(0))
                     
+                    # Extract HQ details (city, state, country separately)
                     if not entities["company_info"]["headquarters"]:
                         address = item.get("address")
                         if isinstance(address, dict):
@@ -1933,6 +2465,16 @@ class ComprehensiveCrawler:
                             city = str(city) if city else None
                             state = str(state) if state else None
                             country = str(country) if country else None
+                            
+                            # Store separately
+                            if city:
+                                entities["company_info"]["hq_city"] = city
+                            if state:
+                                entities["company_info"]["hq_state"] = state
+                            if country:
+                                entities["company_info"]["hq_country"] = country
+                            
+                            # Also store combined
                             if city:
                                 hq_parts = [p for p in [city, state, country] if p]
                                 entities["company_info"]["headquarters"] = ", ".join(hq_parts)
@@ -1948,7 +2490,39 @@ class ComprehensiveCrawler:
                         else:
                             entities["company_info"]["categories"].append(industry)
             
-            # 6. Extract funding events from text content (improved patterns)
+            # 6. Extract funding events from text content AND from structured investors/press pages
+            # First check if this page has extracted investors/press data
+            if "extracted_investors" in page_data:
+                for investor_item in page_data["extracted_investors"]:
+                    if investor_item.get("type") == "funding_mention":
+                        snippet = investor_item.get("snippet", "")
+                        # Try to extract amount from snippet
+                        amount = self._parse_amount(snippet)
+                        if amount and amount >= 100000:
+                            entities["funding_events"].append({
+                                "amount_usd": amount,
+                                "description": snippet,
+                                "source": "investors_page",
+                                "url": page_data["url"]
+                            })
+            
+            if "extracted_press" in page_data:
+                for press_item in page_data["extracted_press"]:
+                    title = press_item.get("title", "")
+                    # Check if title mentions funding
+                    if any(kw in title.lower() for kw in ['funding', 'raised', 'investment', 'series', 'round']):
+                        # Try to extract amount from title
+                        amount = self._parse_amount(title)
+                        if amount and amount >= 100000:
+                            entities["funding_events"].append({
+                                "amount_usd": amount,
+                                "description": title,
+                                "date": press_item.get("date"),
+                                "source": "press_page",
+                                "url": press_item.get("url") or page_data["url"]
+                            })
+            
+            # Also extract from text content (improved patterns with dates)
             text_content = page_data.get("text_content", {}).get("full_text", "")
             if text_content:
                 # Look for funding announcements (more comprehensive patterns)
@@ -1974,23 +2548,79 @@ class ComprehensiveCrawler:
                             round_match = re.search(r'(series\s+[A-Z]|seed|pre-seed|angel|bridge)', context, re.IGNORECASE)
                             round_name = round_match.group(0) if round_match else None
                             
-                            entities["funding_events"].append({
+                            # Try to extract date from context or page metadata
+                            date_str = None
+                            # Look for dates in context (various formats)
+                            date_patterns = [
+                                r'([A-Z][a-z]+\s+\d{1,2},?\s+\d{4})',  # November 18, 2022
+                                r'(\d{4}-\d{2}-\d{2})',  # 2022-11-18
+                                r'([A-Z][a-z]+\s+\d{4})',  # November 2022
+                                r'(\d{1,2}/\d{1,2}/\d{4})',  # 11/18/2022
+                            ]
+                            for date_pattern in date_patterns:
+                                date_match = re.search(date_pattern, context)
+                                if date_match:
+                                    date_str = date_match.group(1)
+                                    break
+                            
+                            # If no date in context, try page metadata
+                            if not date_str:
+                                page_metadata = page_data.get("metadata", {})
+                                # Check if page has date in title or description
+                                title = page_metadata.get("title", "")
+                                desc = page_metadata.get("description", "")
+                                for date_pattern in date_patterns:
+                                    for text in [title, desc]:
+                                        date_match = re.search(date_pattern, text)
+                                        if date_match:
+                                            date_str = date_match.group(1)
+                                            break
+                                    if date_str:
+                                        break
+                            
+                            # If still no date, use page timestamp (but mark as approximate)
+                            if not date_str:
+                                page_timestamp = page_data.get("timestamp", "")
+                                if page_timestamp:
+                                    try:
+                                        from dateutil import parser as date_parser
+                                        dt = date_parser.parse(page_timestamp)
+                                        date_str = dt.strftime("%Y-%m-%d")
+                                    except:
+                                        pass
+                            
+                            funding_event = {
                                 "amount_usd": amount,
                                 "round_name": round_name,
                                 "description": context,
                                 "source": "text_extraction",
                                 "url": page_data["url"]
-                            })
+                            }
+                            
+                            # Add date if found
+                            if date_str:
+                                funding_event["date"] = date_str
+                                funding_event["occurred_on"] = date_str  # Also add for compatibility
+                            
+                            entities["funding_events"].append(funding_event)
             
-            # 7. Extract pricing from pricing pages
+            # 7. Extract pricing from pricing pages (use structured extraction if available)
+            if "extracted_pricing" in page_data:
+                pricing_data = page_data["extracted_pricing"]
+                if pricing_data.get("pricing_model"):
+                    entities["pricing"]["model"] = pricing_data["pricing_model"]
+                if pricing_data.get("tiers"):
+                    entities["pricing"]["tiers"] = pricing_data["tiers"]
+            
+            # Also extract from text content
             url_lower = page_data["url"].lower()
             if any(kw in url_lower for kw in ["/pricing", "/plans", "/prices"]):
                 # Look for pricing tiers
                 pricing_text = page_data.get("text_content", {}).get("full_text", "")
                 # Common pricing patterns
                 tier_patterns = [
-                    r'(?:free|basic|starter|pro|enterprise|premium)',
-                    r'\$\d+[\/\s]?(?:month|year|user)',
+                    r'(?:free|basic|starter|pro|enterprise|premium|business|team|individual)',
+                    r'\$\d+[\/\s]?(?:month|year|user|seat)',
                 ]
                 for pattern in tier_patterns:
                     matches = re.finditer(pattern, pricing_text, re.IGNORECASE)
@@ -1998,6 +2628,155 @@ class ComprehensiveCrawler:
                         tier = match.group(0)
                         if tier not in entities["pricing"]["tiers"]:
                             entities["pricing"]["tiers"].append(tier)
+                
+                # Extract pricing model (seat-based, usage-based, tiered)
+                if not entities["pricing"]["model"]:
+                    pricing_lower = pricing_text.lower()
+                    if any(kw in pricing_lower for kw in ['per seat', 'per user', 'per employee']):
+                        entities["pricing"]["model"] = "seat"
+                    elif any(kw in pricing_lower for kw in ['per api call', 'per request', 'usage-based', 'pay as you go']):
+                        entities["pricing"]["model"] = "usage"
+                    elif any(kw in pricing_lower for kw in ['tier', 'plan', 'package']):
+                        entities["pricing"]["model"] = "tiered"
+            
+            # 8. Extract snapshot data (headcount, job openings, geo presence) from ALL pages
+            text_content = page_data.get("text_content", {}).get("full_text", "")
+            if text_content:
+                # Headcount
+                if not entities["snapshot_data"]["headcount_total"]:
+                    headcount_patterns = [
+                        r'(\d+)\+?\s+employees',
+                        r'team\s+of\s+(\d+)',
+                        r'(\d+)\s+people',
+                        r'headcount[:\s]+(\d+)',
+                        r'(\d+)\s+team\s+members',
+                    ]
+                    for pattern in headcount_patterns:
+                        match = re.search(pattern, text_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                headcount = int(match.group(1))
+                                if 10 <= headcount <= 100000:
+                                    entities["snapshot_data"]["headcount_total"] = headcount
+                                    break
+                            except:
+                                pass
+                
+                # Job openings count
+                if not entities["snapshot_data"]["job_openings_count"]:
+                    job_patterns = [
+                        r'(\d+)\s+open\s+(?:positions|roles|jobs)',
+                        r'(\d+)\s+(?:positions|roles|jobs)\s+available',
+                        r'hiring\s+for\s+(\d+)\s+(?:positions|roles)',
+                        r'(\d+)\s+openings',
+                    ]
+                    for pattern in job_patterns:
+                        match = re.search(pattern, text_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                count = int(match.group(1))
+                                if 1 <= count <= 1000:
+                                    entities["snapshot_data"]["job_openings_count"] = count
+                                    break
+                            except:
+                                pass
+                
+                # Engineering openings
+                if not entities["snapshot_data"]["engineering_openings"]:
+                    eng_patterns = [
+                        r'(\d+)\s+engineering\s+(?:positions|roles|openings)',
+                        r'(\d+)\s+(?:software|backend|frontend|fullstack)\s+engineer',
+                    ]
+                    for pattern in eng_patterns:
+                        match = re.search(pattern, text_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                count = int(match.group(1))
+                                if 1 <= count <= 500:
+                                    entities["snapshot_data"]["engineering_openings"] = count
+                                    break
+                            except:
+                                pass
+                
+                # Sales openings
+                if not entities["snapshot_data"]["sales_openings"]:
+                    sales_patterns = [
+                        r'(\d+)\s+sales\s+(?:positions|roles|openings)',
+                        r'(\d+)\s+(?:account\s+executive|sales\s+rep)',
+                    ]
+                    for pattern in sales_patterns:
+                        match = re.search(pattern, text_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                count = int(match.group(1))
+                                if 1 <= count <= 500:
+                                    entities["snapshot_data"]["sales_openings"] = count
+                                    break
+                            except:
+                                pass
+                
+                # Hiring focus (departments)
+                hiring_focus_keywords = ['engineering', 'sales', 'marketing', 'product', 'design', 'ml', 'ai', 'security', 'operations', 'customer success']
+                for keyword in hiring_focus_keywords:
+                    if keyword in text_content.lower() and keyword not in entities["snapshot_data"]["hiring_focus"]:
+                        # Check if it's in context of hiring
+                        context_pattern = rf'(?:hiring|looking for|seeking|open roles?)\s+.*?{keyword}'
+                        if re.search(context_pattern, text_content, re.IGNORECASE):
+                            entities["snapshot_data"]["hiring_focus"].append(keyword)
+                
+                # Geo presence (office locations)
+                geo_patterns = [
+                    r'(?:office|location|headquarters?)\s+(?:in|at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+                    r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+office',
+                ]
+                for pattern in geo_patterns:
+                    matches = re.finditer(pattern, text_content, re.IGNORECASE)
+                    for match in matches:
+                        location = match.group(1).strip()
+                        if len(location) < 50 and location not in entities["snapshot_data"]["geo_presence"]:
+                            entities["snapshot_data"]["geo_presence"].append(location)
+            
+            # 9. Extract visibility data (GitHub stars, Glassdoor rating)
+            html = page_data.get("raw_html", "")
+            if html:
+                soup = BeautifulSoup(html, 'lxml')
+                
+                # GitHub stars
+                if not entities["visibility_data"]["github_stars"]:
+                    github_links = soup.find_all('a', href=lambda x: x and 'github.com' in str(x).lower() if x else False)
+                    for link in github_links:
+                        # Try to find star count near the link
+                        parent = link.parent
+                        if parent:
+                            text = parent.get_text()
+                            star_match = re.search(r'(\d+(?:,\d+)?)\s*(?:stars?|⭐)', text, re.IGNORECASE)
+                            if star_match:
+                                try:
+                                    stars = int(star_match.group(1).replace(',', ''))
+                                    if stars > 0:
+                                        entities["visibility_data"]["github_stars"] = stars
+                                        break
+                                except:
+                                    pass
+                
+                # Glassdoor rating
+                if not entities["visibility_data"]["glassdoor_rating"]:
+                    glassdoor_patterns = [
+                        r'glassdoor[:\s]+(\d+\.?\d*)',
+                        r'(\d+\.?\d*)\s+(?:stars?|rating)\s+on\s+glassdoor',
+                        r'rated\s+(\d+\.?\d*)\s+on\s+glassdoor',
+                    ]
+                    text_content = page_data.get("text_content", {}).get("full_text", "")
+                    for pattern in glassdoor_patterns:
+                        match = re.search(pattern, text_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                rating = float(match.group(1))
+                                if 0 <= rating <= 5:
+                                    entities["visibility_data"]["glassdoor_rating"] = rating
+                                    break
+                            except:
+                                pass
         
         entities["jobs"] = dedupe_jobs_list(entities["jobs"])
         entities["team_members"] = dedupe_by_field(entities["team_members"], "name")
@@ -2183,6 +2962,51 @@ class ComprehensiveCrawler:
                             linkedin_link = member.find('a', href=lambda x: x and 'linkedin.com' in str(x).lower() if x else False)
                             if linkedin_link:
                                 member_data["sameAs"] = linkedin_link.get('href')
+                                member_data["linkedin"] = linkedin_link.get('href')
+                            
+                            # Extract education
+                            education_patterns = [
+                                r'(?:education|studied|degree|graduated)[:\s]+([A-Z][A-Za-z\s&,\.]+(?:University|College|Institute|School))',
+                                r'([A-Z][A-Za-z\s&,\.]+(?:University|College|Institute|School))',
+                            ]
+                            member_text = member.get_text()
+                            for pattern in education_patterns:
+                                match = re.search(pattern, member_text)
+                                if match:
+                                    education = match.group(1).strip()
+                                    if len(education) < 100:
+                                        member_data["education"] = education
+                                        break
+                            
+                            # Extract previous affiliation
+                            prev_affiliation_patterns = [
+                                r'(?:previously|formerly|prior to|before)[:\s]+([A-Z][A-Za-z0-9\s&,\.]+)',
+                                r'(?:worked at|was at|joined from)[:\s]+([A-Z][A-Za-z0-9\s&,\.]+)',
+                            ]
+                            for pattern in prev_affiliation_patterns:
+                                match = re.search(pattern, member_text, re.IGNORECASE)
+                                if match:
+                                    prev_aff = match.group(1).strip()
+                                    if len(prev_aff) < 100:
+                                        member_data["previous_affiliation"] = prev_aff
+                                        break
+                            
+                            # Extract start/end dates
+                            date_patterns = [
+                                r'(?:joined|started|since)[:\s]+(\d{4})',
+                                r'(\d{4})\s+[–-]\s+(?:present|current)',
+                            ]
+                            for pattern in date_patterns:
+                                match = re.search(pattern, member_text, re.IGNORECASE)
+                                if match:
+                                    year = int(match.group(1))
+                                    if 1990 <= year <= 2025:
+                                        member_data["start_date"] = f"{year}-01-01"
+                                        break
+                            
+                            # Check if founder
+                            if 'founder' in member_text.lower() or 'co-founder' in member_text.lower():
+                                member_data["is_founder"] = True
                             
                             team_members.append(member_data)
                     
@@ -2315,10 +3139,11 @@ class ComprehensiveCrawler:
         return team_members
     
     def _extract_products_from_html(self, html: str, url: str) -> List[Dict]:
-        """Extract products from HTML"""
+        """Extract products from HTML - COMPREHENSIVE (pricing, github, license, customers)"""
         products = []
         try:
             soup = BeautifulSoup(html, 'lxml')
+            text = soup.get_text(separator='\n')
             
             # Common product selectors
             product_selectors = [
@@ -2333,6 +3158,13 @@ class ComprehensiveCrawler:
                         product_data = {
                             "name": None,
                             "description": None,
+                            "pricing_model": None,
+                            "pricing_tiers": [],
+                            "github_repo": None,
+                            "license_type": None,
+                            "reference_customers": [],
+                            "ga_date": None,
+                            "integration_partners": [],
                             "source": "html_extraction",
                             "url": url
                         }
@@ -2346,6 +3178,76 @@ class ComprehensiveCrawler:
                         desc_tag = elem.find('p')
                         if desc_tag:
                             product_data["description"] = desc_tag.get_text().strip()[:500]
+                        
+                        # Extract GitHub repo
+                        github_link = elem.find('a', href=lambda x: x and 'github.com' in str(x).lower() if x else False)
+                        if github_link:
+                            product_data["github_repo"] = github_link.get('href')
+                        
+                        # Extract license type
+                        license_patterns = [
+                            r'license[:\s]+(MIT|Apache|GPL|BSD|AGPL|LGPL|proprietary|commercial)',
+                            r'(MIT|Apache|GPL|BSD|AGPL|LGPL)\s+license',
+                        ]
+                        elem_text = elem.get_text()
+                        for pattern in license_patterns:
+                            match = re.search(pattern, elem_text, re.IGNORECASE)
+                            if match:
+                                product_data["license_type"] = match.group(1)
+                                break
+                        
+                        # Extract pricing info from product element
+                        elem_text_lower = elem_text.lower()
+                        if any(kw in elem_text_lower for kw in ['per seat', 'per user']):
+                            product_data["pricing_model"] = "seat"
+                        elif any(kw in elem_text_lower for kw in ['per api', 'usage-based', 'pay as you go']):
+                            product_data["pricing_model"] = "usage"
+                        elif any(kw in elem_text_lower for kw in ['tier', 'plan', 'package']):
+                            product_data["pricing_model"] = "tiered"
+                        
+                        # Extract pricing tiers
+                        tier_keywords = ['free', 'basic', 'starter', 'pro', 'enterprise', 'premium', 'business', 'team']
+                        for keyword in tier_keywords:
+                            if keyword in elem_text_lower:
+                                product_data["pricing_tiers"].append(keyword.capitalize())
+                        
+                        # Extract integration partners
+                        integration_links = elem.find_all('a', href=True)
+                        for link in integration_links:
+                            href = link.get('href', '')
+                            if any(domain in href.lower() for domain in ['slack.com', 'microsoft.com', 'google.com', 'aws.com', 'azure.com', 'salesforce.com']):
+                                partner_name = link.get_text().strip() or href
+                                if partner_name and partner_name not in product_data["integration_partners"]:
+                                    product_data["integration_partners"].append(partner_name)
+                        
+                        # Extract reference customers
+                        customer_keywords = ['used by', 'trusted by', 'powered by', 'customer', 'client']
+                        for keyword in customer_keywords:
+                            if keyword in elem_text_lower:
+                                # Look for company names after these keywords
+                                context = elem_text[elem_text_lower.find(keyword):elem_text_lower.find(keyword)+200]
+                                # Simple extraction - look for capitalized words
+                                customer_matches = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', context)
+                                for match in customer_matches[:3]:  # Limit to 3
+                                    if len(match) > 3 and match not in product_data["reference_customers"]:
+                                        product_data["reference_customers"].append(match)
+                        
+                        # Extract GA/launch date
+                        date_patterns = [
+                            r'launched\s+(?:in\s+)?(\d{4})',
+                            r'ga\s+(?:in\s+)?(\d{4})',
+                            r'general\s+availability\s+(?:in\s+)?(\d{4})',
+                        ]
+                        for pattern in date_patterns:
+                            match = re.search(pattern, elem_text, re.IGNORECASE)
+                            if match:
+                                try:
+                                    year = int(match.group(1))
+                                    if 2000 <= year <= 2025:
+                                        product_data["ga_date"] = f"{year}-01-01"  # Approximate
+                                        break
+                                except:
+                                    pass
                         
                         if product_data["name"]:
                             products.append(product_data)
@@ -2398,11 +3300,51 @@ class ComprehensiveCrawler:
         return products
     
     def _extract_company_info_from_html(self, html: str, url: str) -> Dict:
-        """Extract company info (founded year, headquarters, description) from HTML"""
+        """Extract company info (founded year, headquarters, description, brand_name, legal_name, related_companies) from HTML - COMPREHENSIVE"""
         info: Dict[str, Any] = {}
         try:
             soup = BeautifulSoup(html, 'lxml')
             text = soup.get_text(separator='\n')
+            
+            # Extract brand name (usually in h1 or title)
+            brand_name = None
+            h1_tag = soup.find('h1')
+            if h1_tag:
+                brand_name = h1_tag.get_text().strip()
+                if len(brand_name) < 100:  # Reasonable brand name length
+                    info["brand_name"] = brand_name
+            
+            # Extract legal name (often in footer or "Legal Name:" pattern)
+            legal_name = None
+            legal_patterns = [
+                r'legal\s+name[:\s]+([A-Za-z0-9\s,&\.]+)',
+                r'incorporated\s+as[:\s]+([A-Za-z0-9\s,&\.]+)',
+                r'doing\s+business\s+as[:\s]+([A-Za-z0-9\s,&\.]+)',
+            ]
+            for pattern in legal_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    legal_name = match.group(1).strip()
+                    if len(legal_name) < 200:
+                        info["legal_name"] = legal_name
+                        break
+            
+            # Extract related companies (competitors, alternatives, similar companies)
+            related_companies = []
+            related_patterns = [
+                r'(?:competitor|alternative|similar|compared to|vs\.?|versus)\s+([A-Z][A-Za-z0-9\s&\.]+)',
+                r'like\s+([A-Z][A-Za-z0-9\s&\.]+)',
+            ]
+            for pattern in related_patterns:
+                matches = re.finditer(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    company_name = match.group(1).strip()
+                    # Filter out common false positives
+                    if len(company_name) < 50 and company_name.lower() not in ['the', 'a', 'an', 'this', 'that']:
+                        related_companies.append(company_name)
+            
+            if related_companies:
+                info["related_companies"] = list(set(related_companies))[:10]  # Limit to 10
             
             # Extract founded year
             founded_patterns = [
@@ -2419,12 +3361,12 @@ class ComprehensiveCrawler:
                         info["founded_year"] = year
                         break
             
-            # Extract headquarters (with better filtering)
+            # Extract headquarters (with better filtering) - also extract city/state/country separately
             hq_patterns = [
-                r'headquarters?[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)',
-                r'based\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)',
-                r'located\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)',
-                r'headquartered\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)',
+                r'headquarters?[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?(?:,\s*[A-Z][a-z]+)?)',
+                r'based\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?(?:,\s*[A-Z][a-z]+)?)',
+                r'located\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?(?:,\s*[A-Z][a-z]+)?)',
+                r'headquartered\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?(?:,\s*[A-Z][a-z]+)?)',
             ]
             for pattern in hq_patterns:
                 match = re.search(pattern, text, re.IGNORECASE)
@@ -2448,6 +3390,24 @@ class ComprehensiveCrawler:
                     
                     if len(hq) < 100 and len(hq) > 3:
                         info["headquarters"] = hq
+                        
+                        # Parse city, state, country from HQ string
+                        hq_parts = [p.strip() for p in hq.split(',')]
+                        if len(hq_parts) >= 1:
+                            info["hq_city"] = hq_parts[0]
+                        if len(hq_parts) >= 2:
+                            # Check if it's a state abbreviation (2 letters) or state name
+                            state_part = hq_parts[1]
+                            if len(state_part) == 2 and state_part.isupper():
+                                info["hq_state"] = state_part
+                            elif len(state_part) > 2:
+                                info["hq_state"] = state_part
+                        if len(hq_parts) >= 3:
+                            info["hq_country"] = hq_parts[2]
+                        elif len(hq_parts) == 2 and not (len(hq_parts[1]) == 2 and hq_parts[1].isupper()):
+                            # If only 2 parts and second isn't a state code, treat as country
+                            info["hq_country"] = hq_parts[1]
+                        
                         break
             
             if not info.get("headquarters"):
@@ -2611,6 +3571,203 @@ class ComprehensiveCrawler:
         
         return partners
     
+    def _parse_investors_page(self, html: str) -> List[Dict]:
+        """Extract investor and funding information (from scraper.py)"""
+        investors_data = []
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+            text = soup.get_text()
+            
+            # Look for funding round mentions
+            funding_patterns = [
+                r'(seed|series [a-z]|series [0-9])\s+round',
+                r'raised\s+\$?([\d.]+)\s*(million|billion|m|b)',
+                r'\$?([\d.]+)\s*(million|billion|m|b)\s+in\s+funding'
+            ]
+            
+            for pattern in funding_patterns:
+                matches = re.finditer(pattern, text.lower())
+                for match in matches:
+                    investors_data.append({
+                        "snippet": match.group(0),
+                        "type": "funding_mention"
+                    })
+            
+            # Extract investor names
+            investor_containers = soup.find_all(['ul', 'div'], class_=lambda x: x and ('investor' in x.lower() or 'backer' in x.lower()) if x else False)
+            for container in investor_containers:
+                items = container.find_all(['li', 'div'])
+                for item in items:
+                    investor_name = item.get_text().strip()
+                    if investor_name and len(investor_name) < 100:
+                        investors_data.append({
+                            "name": investor_name,
+                            "type": "investor"
+                        })
+        
+        except Exception as e:
+            logger.debug(f"Investors parsing failed: {e}")
+        
+        return investors_data
+    
+    def _parse_press_page(self, html: str) -> List[Dict]:
+        """Extract press releases and funding announcements"""
+        press_data = []
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+            text = soup.get_text()
+            
+            # Look for press release titles and dates
+            # Common press release patterns
+            press_selectors = [
+                '.press-release', '.news-item', '.article',
+                '[class*="press"]', '[class*="release"]', '[class*="news"]'
+            ]
+            
+            for selector in press_selectors:
+                items = soup.select(selector)
+                if len(items) > 0:
+                    for item in items[:20]:  # Limit to 20
+                        press_item = {
+                            "title": None,
+                            "date": None,
+                            "url": None,
+                            "type": "press_release"
+                        }
+                        
+                        # Extract title
+                        title_tag = item.find(['h2', 'h3', 'h4', 'a'])
+                        if title_tag:
+                            press_item["title"] = title_tag.get_text().strip()
+                            if title_tag.name == 'a':
+                                press_item["url"] = urljoin(self.base_url, title_tag.get('href', ''))
+                        
+                        # Extract date
+                        date_tag = item.find(['time', 'span'], class_=lambda x: x and 'date' in str(x).lower() if x else False)
+                        if date_tag:
+                            press_item["date"] = date_tag.get('datetime') or date_tag.get_text().strip()
+                        
+                        if press_item["title"]:
+                            press_data.append(press_item)
+                    
+                    if press_data:
+                        break
+        
+        except Exception as e:
+            logger.debug(f"Press parsing failed: {e}")
+        
+        return press_data
+    
+    def _parse_pricing_page(self, html: str) -> Dict:
+        """Extract pricing information (from scraper.py)"""
+        pricing_data = {
+            "pricing_model": None,
+            "tiers": []
+        }
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+            text = soup.get_text().lower()
+            
+            # Detect pricing model
+            if 'per seat' in text or 'per user' in text:
+                pricing_data["pricing_model"] = "per-seat"
+            elif 'usage-based' in text or 'pay as you go' in text:
+                pricing_data["pricing_model"] = "usage-based"
+            elif 'enterprise' in text and 'contact' in text:
+                pricing_data["pricing_model"] = "enterprise"
+            
+            # Extract tier names
+            tier_patterns = ['free', 'starter', 'basic', 'pro', 'professional', 'business', 'enterprise', 'premium', 'plus']
+            
+            # Look for pricing cards/sections
+            pricing_cards = soup.find_all(['div', 'section'], class_=lambda x: x and ('price' in x.lower() or 'tier' in x.lower() or 'plan' in x.lower()) if x else False)
+            
+            for card in pricing_cards:
+                card_text = card.get_text().lower()
+                for tier_name in tier_patterns:
+                    if tier_name in card_text:
+                        # Try to find price
+                        price_match = re.search(r'\$\s*(\d+(?:,\d{3})*(?:\.\d{2})?)', card.get_text())
+                        price = price_match.group(0) if price_match else None
+                        
+                        pricing_data["tiers"].append({
+                            "name": tier_name.capitalize(),
+                            "price": price
+                        })
+                        break
+            
+            # If no tiers found, look for tier names in headings
+            if not pricing_data["tiers"]:
+                headings = soup.find_all(['h2', 'h3', 'h4'])
+                for heading in headings:
+                    heading_text = heading.get_text().lower()
+                    for tier_name in tier_patterns:
+                        if tier_name in heading_text:
+                            pricing_data["tiers"].append({
+                                "name": tier_name.capitalize(),
+                                "price": None
+                            })
+                            break
+        
+        except Exception as e:
+            logger.debug(f"Pricing parsing failed: {e}")
+        
+        return pricing_data
+    
+    def _parse_customers_page(self, html: str) -> List[str]:
+        """Extract customer/client names (from scraper.py)"""
+        customers = []
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+            
+            # Look for customer logos
+            customer_imgs = soup.find_all('img', alt=True)
+            for img in customer_imgs:
+                alt_text = img.get('alt', '').strip()
+                if alt_text and len(alt_text) < 100 and 'logo' not in alt_text.lower():
+                    customers.append(alt_text)
+            
+            # Look for customer lists
+            customer_sections = soup.find_all(['ul', 'div'], class_=lambda x: x and ('customer' in x.lower() or 'client' in x.lower()) if x else False)
+            for section in customer_sections:
+                items = section.find_all(['li', 'div'])
+                for item in items:
+                    customer_name = item.get_text().strip()
+                    if customer_name and len(customer_name) < 100:
+                        customers.append(customer_name)
+        
+        except Exception as e:
+            logger.debug(f"Customers parsing failed: {e}")
+        
+        return list(set(customers))[:50]
+    
+    def _parse_partners_page(self, html: str) -> List[str]:
+        """Extract integration partner names (from scraper.py)"""
+        partners = []
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+            
+            # Look for partner logos with alt text
+            partner_imgs = soup.find_all('img', alt=True)
+            for img in partner_imgs:
+                alt_text = img.get('alt', '').strip()
+                if alt_text and len(alt_text) < 100:
+                    partners.append(alt_text)
+            
+            # Look for partner lists
+            partner_sections = soup.find_all(['ul', 'div'], class_=lambda x: x and ('partner' in x.lower() or 'integration' in x.lower()) if x else False)
+            for section in partner_sections:
+                items = section.find_all(['li', 'a'])
+                for item in items:
+                    partner_name = item.get_text().strip()
+                    if partner_name and len(partner_name) < 100:
+                        partners.append(partner_name)
+        
+        except Exception as e:
+            logger.debug(f"Partners parsing failed: {e}")
+        
+        return list(set(partners))[:50]
+    
     def save_results(self):
         """Save all extracted data"""
         
@@ -2640,42 +3797,67 @@ class ComprehensiveCrawler:
                     entities['news_articles'].append(article)
                     existing_article_urls.add(article.get('url', ''))
         
-        # Save complete page data
-        for i, page_data in enumerate(self.pages_data):
-            # Determine page type from URL
-            url = page_data["url"]
+        # Helper function to determine standard page type
+        def determine_standard_page_type(url: str) -> str:
+            """Determine standard 12 page type from URL, checking discovered_pages first"""
             url_lower = url.lower()
-            
             parsed = urlparse(url)
             path_fragment = parsed.path.strip('/')
+            
+            # FIRST: Check if URL matches any discovered page (most accurate)
+            for page_type, discovered_url in self.discovered_pages.items():
+                if discovered_url and url_lower == discovered_url.lower():
+                    return page_type
+            
+            # SECOND: Check URL patterns for standard 12 page types (order matters - more specific first)
             if url_lower.rstrip('/') == self.base_url.lower().rstrip('/'):
-                page_type = "homepage"
-            elif any(kw in url_lower for kw in ['/career', '/job']):
-                page_type = "careers"
-            elif any(kw in url_lower for kw in ['/about', '/company']):
-                if path_fragment and path_fragment != 'about':
-                    page_type = path_fragment.replace('/', '_')[:80]
-                else:
-                    page_type = "about"
-            elif any(kw in url_lower for kw in ['/team', '/leadership']):
-                page_type = "team"
-            elif '/blog/' in url_lower or '/news/' in url_lower or path_fragment.startswith('blog'):
-                if path_fragment in ('blog', 'news'):
-                    page_type = path_fragment
-                elif path_fragment:
-                    page_type = path_fragment.replace('/', '_')[:80]
-                else:
-                    page_type = "blog"
-            elif any(kw in url_lower for kw in ['/product', '/platform']):
-                if path_fragment and path_fragment not in ('product', 'products'):
-                    page_type = path_fragment.replace('/', '_')[:80]
-                else:
-                    page_type = "product"
-            elif any(kw in url_lower for kw in ['/pricing']):
-                page_type = "pricing"
+                return "homepage"
+            # Check path fragment first for exact matches
+            elif path_fragment in ['company', 'about-us', 'who-we-are', 'our-story']:
+                return "about"
+            elif path_fragment in ['news', 'articles', 'updates', 'insights']:
+                return "blog"
+            elif path_fragment in ['open-positions', 'jobs', 'careers']:
+                return "careers"
+            # Then check URL patterns (more specific patterns first)
+            elif '/open-position' in url_lower or '/open-positions' in url_lower:
+                return "careers"
+            elif '/career' in url_lower or '/job' in url_lower or '/join-us' in url_lower or '/work-with' in url_lower:
+                return "careers"
+            elif '/about' in url_lower or '/company' in url_lower or '/who-we-are' in url_lower or '/our-story' in url_lower:
+                return "about"
+            elif '/team' in url_lower or '/leadership' in url_lower or '/people' in url_lower or '/our-team' in url_lower:
+                return "team"
+            elif '/blog/' in url_lower or '/news/' in url_lower or '/insights/' in url_lower or '/resources/' in url_lower or '/article/' in url_lower:
+                # All blog posts should be categorized as "blog"
+                return "blog"
+            elif '/blog' in url_lower or '/news' in url_lower or '/insights' in url_lower or '/resources' in url_lower or '/articles' in url_lower:
+                # Blog index pages or news pages
+                return "blog"
+            elif '/product' in url_lower or '/products' in url_lower or '/platform' in url_lower or '/solutions' in url_lower or '/features' in url_lower:
+                return "product"
+            elif '/pricing' in url_lower or '/plans' in url_lower or '/price' in url_lower or '/buy' in url_lower:
+                return "pricing"
+            elif '/press' in url_lower or '/newsroom' in url_lower or '/media' in url_lower or '/news-and-press' in url_lower:
+                return "press"
+            elif '/investor' in url_lower or '/funding' in url_lower or '/backed-by' in url_lower or '/backers' in url_lower:
+                return "investors"
+            elif '/customer' in url_lower or '/client' in url_lower or '/case-stud' in url_lower or '/success-stor' in url_lower or '/testimonial' in url_lower:
+                return "customers"
+            elif '/partner' in url_lower or '/integration' in url_lower or '/ecosystem' in url_lower or '/partnership' in url_lower:
+                return "partners"
+            elif '/contact' in url_lower or '/get-in-touch' in url_lower or '/reach-us' in url_lower or '/contact-sales' in url_lower:
+                return "contact"
             else:
-                path = path_fragment.replace('/', '_') or f"page_{i}"
-                page_type = path[:80]  # Limit length
+                # Fallback: use path fragment but limit to 80 chars
+                path = path_fragment.replace('/', '_') or f"page_{len(self.pages_data)}"
+                return path[:80]
+        
+        # Save complete page data
+        for i, page_data in enumerate(self.pages_data):
+            # Determine page type using standard 12 types
+            url = page_data["url"]
+            page_type = determine_standard_page_type(url)
             
             # Save HTML
             html = page_data.get("raw_html", "")
@@ -2688,6 +3870,15 @@ class ComprehensiveCrawler:
             if clean_text:
                 txt_file = self.output_dir / f"{page_type}_clean.txt"
                 txt_file.write_text(clean_text, encoding='utf-8')
+            
+            # Skip saving error pages (unless they're marked for debugging)
+            if page_data.get("error_detected") and not page_data.get("load_failed"):
+                # Error was detected but might be recoverable, save with warning
+                logger.debug(f"  ⚠️  Saving page with detected error: {page_type}")
+            elif page_data.get("load_failed"):
+                # Page failed to load properly, skip saving to avoid bad data
+                logger.warning(f"  ⚠️  Skipping failed page: {page_type} ({page_data.get('error_detected', 'unknown error')})")
+                continue
             
             # Save complete JSON (without raw HTML to save space)
             page_data_copy = page_data.copy()
@@ -2778,6 +3969,98 @@ class ComprehensiveCrawler:
         aggregated_file = self.output_dir / "complete_extraction.json"
         aggregated_file.write_text(json.dumps(aggregated, indent=2, default=str), encoding='utf-8')
         
+        # Build pages array for metadata (required by structured_extraction_v2.py)
+        # Exclude failed pages from the pages array
+        pages_array = []
+        for page_data in self.pages_data:
+            # Skip failed pages
+            if page_data.get("load_failed"):
+                continue
+                
+            url = page_data["url"]
+            
+            # Use same page type determination logic as save_results
+            # (determine_standard_page_type is defined above in save_results)
+            page_type = determine_standard_page_type(url)
+            
+            # Get crawled_at from page_data timestamp
+            crawled_at = page_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+            
+            # Determine status code based on error detection
+            status_code = 200
+            if page_data.get("error_detected"):
+                if "404" in page_data["error_detected"]:
+                    status_code = 404
+                elif "500" in page_data["error_detected"]:
+                    status_code = 500
+                else:
+                    status_code = 200  # Client-side errors still return 200 HTTP status
+            
+            pages_array.append({
+                "page_type": page_type,
+                "source_url": url,
+                "crawled_at": crawled_at,
+                "found": True,
+                "status_code": status_code
+            })
+        
+        # Also add blog post URLs from news_articles
+        for article in entities.get("news_articles", []):
+            article_url = article.get("url")
+            if article_url and article_url not in [p["source_url"] for p in pages_array]:
+                # Determine if it's a blog post
+                url_lower = article_url.lower()
+                if any(kw in url_lower for kw in ['/blog/', '/news/', '/post/', '/article/']):
+                    parsed = urlparse(article_url)
+                    path_fragment = parsed.path.strip('/')
+                    if path_fragment:
+                        page_type = path_fragment.replace('/', '_')[:80]
+                    else:
+                        page_type = "blog"
+                    
+                    pages_array.append({
+                        "page_type": page_type,
+                        "source_url": article_url,
+                        "crawled_at": article.get("date_published") or article.get("date_modified") or datetime.now(timezone.utc).isoformat(),
+                        "found": True,
+                        "status_code": 200
+                    })
+        
+        # Calculate which page types were successfully extracted
+        extracted_page_types = set()
+        for page_data in self.pages_data:
+            page_type = page_data.get("page_type")
+            if page_type:
+                extracted_page_types.add(page_type)
+            else:
+                # Infer from URL
+                url = page_data.get("url", "")
+                url_lower = url.lower()
+                if url_lower.rstrip('/') == self.base_url.lower().rstrip('/'):
+                    extracted_page_types.add("homepage")
+                elif any(kw in url_lower for kw in ['/about', '/company']):
+                    extracted_page_types.add("about")
+                elif any(kw in url_lower for kw in ['/career', '/job']):
+                    extracted_page_types.add("careers")
+                elif any(kw in url_lower for kw in ['/blog', '/news']):
+                    extracted_page_types.add("blog")
+                elif any(kw in url_lower for kw in ['/team', '/leadership']):
+                    extracted_page_types.add("team")
+                elif any(kw in url_lower for kw in ['/investor', '/funding']):
+                    extracted_page_types.add("investors")
+                elif any(kw in url_lower for kw in ['/customer', '/client']):
+                    extracted_page_types.add("customers")
+                elif any(kw in url_lower for kw in ['/press', '/newsroom']):
+                    extracted_page_types.add("press")
+                elif any(kw in url_lower for kw in ['/pricing', '/plans']):
+                    extracted_page_types.add("pricing")
+                elif any(kw in url_lower for kw in ['/partner', '/integration']):
+                    extracted_page_types.add("partners")
+                elif any(kw in url_lower for kw in ['/contact']):
+                    extracted_page_types.add("contact")
+                elif any(kw in url_lower for kw in ['/product', '/platform']):
+                    extracted_page_types.add("product")
+        
         # Save metadata
         metadata = {
             "company_name": self.company_name,
@@ -2789,6 +4072,9 @@ class ComprehensiveCrawler:
             "total_structured_items": len(aggregated["all_structured_data"]),
             "total_links": len(aggregated["all_links"]),
             "total_images": len(aggregated["all_images"]),
+            "pages": pages_array,  # CRITICAL: Add pages array for structured_extraction_v2.py
+            "page_types_extracted": sorted(list(extracted_page_types)),  # NEW: Track which page types were extracted
+            "page_types_discovered": {pt: url for pt, url in self.discovered_pages.items() if url},  # NEW: Track discovered pages
             "entities_summary": {
                 "jobs": len(entities["jobs"]),
                 "team_members": len(entities["team_members"]),
@@ -2821,6 +4107,10 @@ class ComprehensiveCrawler:
         logger.info(f"  💾 Saved {len(self.pages_data)} pages with complete data")
         logger.info(f"  📊 Extracted: {len(entities['jobs'])} jobs, {len(entities['team_members'])} team members, "
                    f"{len(entities['products'])} products, {len(entities['news_articles'])} news articles")
+        logger.info(f"  📋 Page types extracted: {len(extracted_page_types)}/12 - {', '.join(sorted(extracted_page_types))}")
+        missing_types = [pt for pt in PAGE_PATTERNS.keys() if pt not in extracted_page_types]
+        if missing_types:
+            logger.warning(f"  ⚠️  Missing page types: {', '.join(missing_types)}")
 
 
 # ============================================================================
