@@ -14,6 +14,8 @@ from openai import OpenAI
 from services.embeddings import Embeddings
 from structured_extraction import extract_company_payload
 from urllib.parse import urlparse
+from agents.workflow import WorkflowGraph, WorkflowState, WorkflowStatus
+from datetime import datetime
 
 
 dotenv.load_dotenv()
@@ -561,6 +563,254 @@ Do not include any sections beyond these 8. If you cannot find information for a
             status_code=500,
             detail=f"Failed to generate structured dashboard: {str(e)}"
         )
+# ============================================================================
+# HITL (Human-In-The-Loop) Approval Endpoints
+# ============================================================================
+
+HITL_APPROVALS_DIR = PROJECT_ROOT / "data" / "hitl_approvals"
+HITL_APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
+
+class ApprovalRequest(BaseModel):
+    """Model for approval request"""
+    approval_id: str
+    company_name: str
+    risk_count: int
+    risks: List[Dict]
+    dashboard_preview: Optional[str] = None
+    paused_at: str
+    approved: Optional[bool] = None
+    reviewed_at: Optional[str] = None
+    reviewer: Optional[str] = None
+    review_notes: Optional[str] = None
+
+class ApprovalResponse(BaseModel):
+    """Response model for approval operations"""
+    success: bool
+    message: str
+    approval_id: str
+    approved: Optional[bool] = None
+
+class ApprovalActionRequest(BaseModel):
+    """Request model for approve/reject actions"""
+    reviewer: Optional[str] = None
+    review_notes: Optional[str] = None
+
+@app.get("/hitl/approvals", tags=["HITL"], response_model=List[ApprovalRequest])
+async def list_approvals(status: Optional[str] = None):
+    """
+    List all HITL approval requests.
+    
+    Args:
+        status: Filter by status - "pending", "approved", "rejected"
+    
+    Returns:
+        List of approval requests
+    """
+    approvals = []
+    
+    for approval_file in HITL_APPROVALS_DIR.glob("*.json"):
+        try:
+            with open(approval_file, 'r') as f:
+                data = json.load(f)
+            
+            # Filter by status if provided
+            if status:
+                is_pending = data.get("approved") is None
+                if status == "pending" and not is_pending:
+                    continue
+                elif status == "approved" and data.get("approved") != True:
+                    continue
+                elif status == "rejected" and data.get("approved") != False:
+                    continue
+            
+            approvals.append(ApprovalRequest(**data))
+        except Exception as e:
+            continue
+    
+    # Sort by paused_at (most recent first)
+    approvals.sort(key=lambda x: x.paused_at, reverse=True)
+    return approvals
+
+@app.get("/hitl/approvals/{approval_id}", tags=["HITL"], response_model=ApprovalRequest)
+async def get_approval(approval_id: str):
+    """
+    Get details of a specific approval request.
+    
+    Args:
+        approval_id: Unique approval ID
+    
+    Returns:
+        Approval request details
+    """
+    approval_file = HITL_APPROVALS_DIR / f"{approval_id}.json"
+    
+    if not approval_file.exists():
+        raise HTTPException(status_code=404, detail=f"Approval request {approval_id} not found")
+    
+    try:
+        with open(approval_file, 'r') as f:
+            data = json.load(f)
+        return ApprovalRequest(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read approval request: {str(e)}")
+
+@app.post("/hitl/approvals/{approval_id}/approve", tags=["HITL"], response_model=ApprovalResponse)
+async def approve_request(approval_id: str, request: ApprovalActionRequest):
+    """
+    Approve an HITL approval request.
+    
+    Args:
+        approval_id: Unique approval ID
+        request: Approval action details (reviewer, notes)
+    
+    Returns:
+        Approval response
+    """
+    approval_file = HITL_APPROVALS_DIR / f"{approval_id}.json"
+    
+    if not approval_file.exists():
+        raise HTTPException(status_code=404, detail=f"Approval request {approval_id} not found")
+    
+    try:
+        with open(approval_file, 'r') as f:
+            data = json.load(f)
+        
+        # Check if already reviewed
+        if data.get("approved") is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request {approval_id} has already been reviewed"
+            )
+        
+        # Update approval
+        data["approved"] = True
+        data["reviewed_at"] = datetime.now().isoformat()
+        data["reviewer"] = request.reviewer or "system"
+        data["review_notes"] = request.review_notes
+        
+        with open(approval_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        return ApprovalResponse(
+            success=True,
+            message="Approval request approved successfully",
+            approval_id=approval_id,
+            approved=True
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to approve request: {str(e)}")
+
+@app.post("/hitl/approvals/{approval_id}/reject", tags=["HITL"], response_model=ApprovalResponse)
+async def reject_request(approval_id: str, request: ApprovalActionRequest):
+    """
+    Reject an HITL approval request.
+    
+    Args:
+        approval_id: Unique approval ID
+        request: Rejection action details (reviewer, notes)
+    
+    Returns:
+        Approval response
+    """
+    approval_file = HITL_APPROVALS_DIR / f"{approval_id}.json"
+    
+    if not approval_file.exists():
+        raise HTTPException(status_code=404, detail=f"Approval request {approval_id} not found")
+    
+    try:
+        with open(approval_file, 'r') as f:
+            data = json.load(f)
+        
+        # Check if already reviewed
+        if data.get("approved") is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request {approval_id} has already been reviewed"
+            )
+        
+        # Update rejection
+        data["approved"] = False
+        data["reviewed_at"] = datetime.now().isoformat()
+        data["reviewer"] = request.reviewer or "system"
+        data["review_notes"] = request.review_notes
+        
+        with open(approval_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        return ApprovalResponse(
+            success=True,
+            message="Approval request rejected successfully",
+            approval_id=approval_id,
+            approved=False
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reject request: {str(e)}")
+
+@app.post("/dashboard/workflow", tags=["Dashboard"], response_model=Dict)
+async def generate_dashboard_with_workflow(request: CompanyRequest):
+    """
+    Generate dashboard using graph-based workflow with HITL support.
+    
+    This endpoint executes the full workflow including risk detection and HITL pause.
+    If risks are detected, the workflow will pause and wait for approval via the
+    HITL approval endpoints.
+    
+    Args:
+        request: Company request with company_name
+    
+    Returns:
+        Workflow execution result with dashboard and execution path
+    """
+    try:
+        workflow = WorkflowGraph()
+        state = await workflow.execute(request.company_name)
+        
+        # Get execution path
+        execution_path = workflow.get_execution_path(state)
+        
+        # Build response
+        response = {
+            "company_name": state.company_name,
+            "company_id": state.company_id,
+            "status": state.status.value,
+            "dashboard": state.dashboard,
+            "execution_path": execution_path,
+            "risk_detected": state.risk_detected,
+            "risk_count": len(state.risk_signals),
+            "hitl_approval_id": state.hitl_approval_id,
+            "hitl_approved": state.hitl_approved,
+            "started_at": state.started_at.isoformat(),
+            "completed_at": state.completed_at.isoformat() if state.completed_at else None,
+            "node_results": {
+                node_name: {
+                    "status": result.status.value,
+                    "output": result.output,
+                    "error": result.error,
+                    "timestamp": result.timestamp.isoformat()
+                }
+                for node_name, result in state.node_results.items()
+            }
+        }
+        
+        # If workflow is paused for approval, include approval details
+        if state.status == WorkflowStatus.PAUSED_FOR_APPROVAL:
+            response["approval_required"] = True
+            response["approval_url"] = f"/hitl/approvals/{state.hitl_approval_id}"
+        else:
+            response["approval_required"] = False
+        
+        return response
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to execute workflow: {str(e)}"
+        )
+
 # ============================================================================
 # Health Check
 # ============================================================================

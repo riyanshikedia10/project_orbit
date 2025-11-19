@@ -334,6 +334,13 @@ class HITLPauseNode(WorkflowNode):
             # Save approval request to file (for HITL system)
             self._save_approval_request(approval_request)
             
+            # Log HITL pause event
+            logger.info(
+                f"HITL_PAUSE: Workflow paused for approval. "
+                f"Approval ID: {approval_id}, Company: {state.company_name}, "
+                f"Risk Count: {len(state.risk_signals)}"
+            )
+            
             # If callback provided, use it; otherwise wait for file-based approval
             if self.approval_callback:
                 approved = await self.approval_callback(approval_id)
@@ -346,6 +353,13 @@ class HITLPauseNode(WorkflowNode):
             if approved:
                 state.status = WorkflowStatus.APPROVED
                 self.status = NodeStatus.COMPLETED
+                
+                # Log HITL approval event
+                logger.info(
+                    f"HITL_APPROVED: Approval granted. "
+                    f"Approval ID: {approval_id}, Company: {state.company_name}"
+                )
+                
                 return NodeResult(
                     node_name=self.name,
                     status=self.status,
@@ -355,6 +369,13 @@ class HITLPauseNode(WorkflowNode):
             else:
                 state.status = WorkflowStatus.REJECTED
                 self.status = NodeStatus.COMPLETED
+                
+                # Log HITL rejection event
+                logger.warning(
+                    f"HITL_REJECTED: Approval denied. "
+                    f"Approval ID: {approval_id}, Company: {state.company_name}"
+                )
+                
                 return NodeResult(
                     node_name=self.name,
                     status=self.status,
