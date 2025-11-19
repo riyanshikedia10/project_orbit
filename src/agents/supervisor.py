@@ -37,6 +37,7 @@ from .models import (
     SignalReportResponse,
 )
 from .react_models import ReActStep, ReActTrace, ActionType
+from .cloud_logging import log_react_trace_to_cloud, log_react_step_to_cloud
 # endregion
 
 # region globals, environment variables, and logging
@@ -162,6 +163,17 @@ class SupervisorAgent:
                 trace.steps.append(step)
                 logger.info(f"Step {step_number}: {action_type.value} - {thought[:100]}...")
                 
+                # Log step to Cloud Logging (if enabled)
+                try:
+                    log_react_step_to_cloud(
+                        step=step,
+                        company_id=company_id,
+                        query=query,
+                        severity="INFO" if not error else "WARNING"
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to log step to Cloud Logging: {e}")
+                
                 # Update context with observation
                 if observation:
                     context.append(f"Step {step_number}: {observation}")
@@ -186,12 +198,24 @@ class SupervisorAgent:
             
             logger.info(f"ReAct workflow completed: {trace.total_steps} steps, success={trace.success}")
             
+            # Log complete trace to Cloud Logging (if enabled)
+            try:
+                log_react_trace_to_cloud(trace, severity="INFO")
+            except Exception as e:
+                logger.debug(f"Failed to log trace to Cloud Logging: {e}")
+            
         except Exception as e:
             logger.error(f"Error in ReAct workflow: {e}", exc_info=True)
             trace.completed_at = datetime.now()
             trace.total_steps = len(trace.steps)
             trace.success = False
             trace.final_answer = f"Error: {str(e)}"
+            
+            # Log failed trace to Cloud Logging (if enabled)
+            try:
+                log_react_trace_to_cloud(trace, severity="ERROR")
+            except Exception as log_error:
+                logger.debug(f"Failed to log error trace to Cloud Logging: {log_error}")
         
         return trace
     
