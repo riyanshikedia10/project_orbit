@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import json
+import logging
 from pathlib import Path
 import os
 import dotenv
@@ -15,10 +16,15 @@ from src.services.embeddings import Embeddings
 from src.structured_extraction import extract_company_payload
 from urllib.parse import urlparse
 from src.agents.workflow import WorkflowGraph, WorkflowState, WorkflowStatus
+from src.agents.supervisor import SupervisorAgent
+from src.agents.react_models import ReActTrace, ReActStep, ActionType
 from datetime import datetime
 
 
 dotenv.load_dotenv()
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -127,6 +133,32 @@ class CompanyInfo(BaseModel):
     hq_city: str
     hq_country: str
     category: str
+
+class AgentDashboardRequest(BaseModel):
+    """Request model for agent-driven dashboard generation"""
+    company_name: str = Field(..., description="Name of the company (e.g., 'Abridge', 'Anthropic')")
+    query: Optional[str] = Field(None, description="Optional query or question about the company")
+    company_id: Optional[str] = Field(None, description="Optional company ID (will be extracted if not provided)")
+
+class AgentDashboardResponse(BaseModel):
+    """Response model for agent-driven dashboard generation"""
+    company_name: str
+    company_id: Optional[str]
+    query: Optional[str]
+    dashboard: Optional[str]
+    status: str
+    # Supervisor Agent trace
+    agent_trace: Dict
+    # Workflow execution details
+    workflow_execution: Dict
+    # Combined metadata
+    execution_path: List[str]
+    risk_detected: bool
+    risk_count: int
+    hitl_approval_id: Optional[str] = None
+    hitl_approved: Optional[bool] = None
+    started_at: str
+    completed_at: Optional[str] = None
 
 def load_companies() -> List[Dict]:
     """Load companies from seed file (local development)"""
@@ -264,6 +296,9 @@ async def root():
             "companies": "/companies",
             "dashboard_rag": "/dashboard/rag",
             "dashboard_structured": "/dashboard/structured",
+            "dashboard_workflow": "/dashboard/workflow",
+            "dashboard_agent": "/dashboard/agent",
+            "hitl_approvals": "/hitl/approvals",
         }
     }
 
@@ -814,6 +849,136 @@ async def generate_dashboard_with_workflow(request: CompanyRequest):
 # ============================================================================
 # Health Check
 # ============================================================================
+
+@app.post("/dashboard/agent", tags=["Dashboard"], response_model=AgentDashboardResponse)
+async def generate_dashboard_with_agent(request: AgentDashboardRequest):
+    """
+    Generate dashboard using Supervisor Agent + WorkflowGraph integration.
+    
+    This endpoint:
+    1. Uses SupervisorAgent with ReAct workflow to reason about the company and query
+    2. Executes WorkflowGraph to generate the dashboard through the graph-based workflow
+    3. Returns both the agent trace and the generated dashboard
+    
+    The SupervisorAgent first gathers information about the company using its tools,
+    then the WorkflowGraph executes the full dashboard generation workflow with risk
+    detection and HITL support.
+    
+    Args:
+        request: Agent dashboard request with company_name, optional query and company_id
+    
+    Returns:
+        Combined response with agent trace, workflow execution, and dashboard
+    """
+    try:
+        start_time = datetime.now()
+        
+        # Step 1: Initialize Supervisor Agent
+        agent = SupervisorAgent(
+            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            max_iterations=10,
+            enable_llm_reasoning=True
+        )
+        
+        # Step 2: Get or extract company_id
+        company_id = request.company_id
+        if not company_id:
+            try:
+                company_id = get_company_id_from_name(request.company_name)
+            except HTTPException:
+                # If company not found, try to extract from name
+                company_id = request.company_name.lower().replace(" ", "_")
+        
+        # Step 3: Execute Supervisor Agent query
+        query = request.query or f"Generate a comprehensive dashboard for {request.company_name}"
+        
+        logger.info(f"Starting Supervisor Agent for query: '{query}' (company_id={company_id})")
+        agent_trace_obj = await agent.execute_query(query, company_id)
+        
+        # Convert ReActTrace to dict for response
+        agent_trace = {
+            "query": agent_trace_obj.query,
+            "company_id": agent_trace_obj.company_id,
+            "final_answer": agent_trace_obj.final_answer,
+            "success": agent_trace_obj.success,
+            "total_steps": agent_trace_obj.total_steps,
+            "started_at": agent_trace_obj.started_at.isoformat(),
+            "completed_at": agent_trace_obj.completed_at.isoformat() if agent_trace_obj.completed_at else None,
+            "steps": [
+                {
+                    "step_number": step.step_number,
+                    "thought": step.thought,
+                    "action": step.action.value,
+                    "action_input": step.action_input,
+                    "observation": step.observation,
+                    "error": step.error,
+                    "timestamp": step.timestamp.isoformat()
+                }
+                for step in agent_trace_obj.steps
+            ]
+        }
+        
+        logger.info(f"Supervisor Agent completed: {agent_trace_obj.total_steps} steps, success={agent_trace_obj.success}")
+        
+        # Step 4: Execute WorkflowGraph to generate dashboard
+        logger.info(f"Starting WorkflowGraph for {request.company_name}")
+        workflow = WorkflowGraph()
+        workflow_state = await workflow.execute(request.company_name, company_id)
+        
+        # Get execution path
+        execution_path = workflow.get_execution_path(workflow_state)
+        
+        # Build workflow execution details
+        workflow_execution = {
+            "status": workflow_state.status.value,
+            "execution_path": execution_path,
+            "node_results": {
+                node_name: {
+                    "status": result.status.value,
+                    "output": result.output,
+                    "error": result.error,
+                    "timestamp": result.timestamp.isoformat()
+                }
+                for node_name, result in workflow_state.node_results.items()
+            },
+            "risk_detected": workflow_state.risk_detected,
+            "risk_count": len(workflow_state.risk_signals),
+            "hitl_approval_id": workflow_state.hitl_approval_id,
+            "hitl_approved": workflow_state.hitl_approved
+        }
+        
+        # Step 5: Build combined response
+        end_time = datetime.now()
+        
+        response = AgentDashboardResponse(
+            company_name=request.company_name,
+            company_id=company_id,
+            query=query,
+            dashboard=workflow_state.dashboard,
+            status=workflow_state.status.value,
+            agent_trace=agent_trace,
+            workflow_execution=workflow_execution,
+            execution_path=execution_path,
+            risk_detected=workflow_state.risk_detected,
+            risk_count=len(workflow_state.risk_signals),
+            hitl_approval_id=workflow_state.hitl_approval_id,
+            hitl_approved=workflow_state.hitl_approved,
+            started_at=start_time.isoformat(),
+            completed_at=end_time.isoformat()
+        )
+        
+        logger.info(f"Agent + Workflow completed for {request.company_name}")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in agent-driven dashboard generation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate dashboard with agent: {str(e)}"
+        )
 
 @app.get("/health", tags=["Health"])
 async def health_check():

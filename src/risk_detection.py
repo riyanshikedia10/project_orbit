@@ -8,7 +8,7 @@ import json
 from typing import List, Dict, Optional
 from datetime import datetime
 from pathlib import Path
-from services.embeddings import Embeddings, PineconeStorage
+from src.services.embeddings import Embeddings, PineconeStorage
 import dotenv
 
 dotenv.load_dotenv()

@@ -109,35 +109,31 @@ def _load_payload_sync(company_id: str) -> Tuple[Optional[Payload], str, bool]:
     Returns:
         Tuple of (payload, source, found)
     """
-    environment = os.getenv("ENVIROMENT", "development").lower()
-    use_gcs = False
     bucket_name = os.getenv("GCS_BUCKET_NAME")
-    if environment == "production" and bucket_name is not None and get_storage_client() is not None and get_storage_client().bucket(bucket_name).exists():
-        use_gcs = True
+    storage_client = get_storage_client()
     
-    if use_gcs:
-        # Try to load from GCS
+    # Prioritize GCS if bucket name is set and client is available
+    if bucket_name and storage_client:
+        # Try to load from GCS first
         payload_path = f"payloads/{company_id}.json"
         logger.info(f"Loading payload from GCS: gs://{bucket_name}/{payload_path}")
         
-        client = get_storage_client()
-        if client:
-            try:
-                bucket = client.bucket(bucket_name)
-                blob = bucket.blob(payload_path)
-                
-                if blob.exists():
-                    content = blob.download_as_text()
-                    payload_data = json.loads(content)
-                    payload = Payload(**payload_data)
-                    logger.info(f"✅ Loaded payload from GCS for {company_id}")
-                    return payload, "gcs", True
-                else:
-                    logger.warning(f"⚠️  Payload not found in GCS: {payload_path}")
-            except Exception as e:
-                logger.error(f"⚠️  Failed to load payload from GCS: {e}")
+        try:
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(payload_path)
+            
+            if blob.exists():
+                content = blob.download_as_text()
+                payload_data = json.loads(content)
+                payload = Payload(**payload_data)
+                logger.info(f"✅ Loaded payload from GCS for {company_id}")
+                return payload, "gcs", True
+            else:
+                logger.warning(f"⚠️  Payload not found in GCS: {payload_path}")
+        except Exception as e:
+            logger.error(f"⚠️  Failed to load payload from GCS: {e}")
     
-    # Try to load from local filesystem
+    # Fallback to local filesystem
     project_root = Path(__file__).resolve().parents[2]
     payload_path = project_root / "data" / "payloads" / f"{company_id}.json"
     logger.info(f"Loading payload from local: {payload_path}")
@@ -154,8 +150,8 @@ def _load_payload_sync(company_id: str) -> Tuple[Optional[Payload], str, bool]:
     else:
         logger.warning(f"⚠️  Payload file not found: {payload_path}")
     
-    return None, "local" if not use_gcs else "gcs", False
-
+    return None, "gcs" if (bucket_name and storage_client) else "local", False
+    
 # endregion
 # region Tool 2: RAG Search Company
 # ============================================================================

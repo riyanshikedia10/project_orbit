@@ -375,9 +375,17 @@ class SupervisorAgent:
                 result: PayloadResponse = await self.tools["get_latest_structured_payload"](company_id)
                 
                 if result.found and result.payload:
+                    if result.payload.company_record:
+                        company_name = (
+                            result.payload.company_record.brand_name 
+                            or result.payload.company_record.legal_name 
+                            or 'N/A'
+                        )
+                    else:
+                        company_name = 'N/A'
                     return (
                         f"Retrieved structured payload for {company_id}. "
-                        f"Company: {result.payload.company.name if result.payload.company else 'N/A'}. "
+                        f"Company: {company_name}. "
                         f"Source: {result.source}.",
                         None
                     )
