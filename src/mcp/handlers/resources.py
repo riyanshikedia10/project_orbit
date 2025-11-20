@@ -194,33 +194,43 @@ async def read_resource(request: ResourceReadRequest) -> ResourceReadResponse:
                 content_text = local_path.read_text()
             else:
                 raise ValueError(f"Risk signals not found for date: {date}")
-
-        elif resource_id == "ai50/companies":
-            # Special handler for company IDs list
+        elif resource_id == "ai50_companies":
+            # Load the SAME seed file
             if use_gcs:
                 client = get_storage_client()
                 bucket = client.bucket(bucket_name)
-                blob = bucket.blob(metadata["gcs_path"])
-                if blob.exists():
-                    content_text = blob.download_as_text()
-                else:
-                    raise ValueError(f"Company seed data not found in GCS: {metadata['gcs_path']}")
+                blob = bucket.blob("seed/forbes_ai50_seed.json")  # Same file
+                content_text = blob.download_as_text()
             else:
                 project_root = _get_project_root()
-                local_path = project_root / metadata["local_path"]
-                if local_path.exists():
-                    content_text = local_path.read_text()
+                local_path = project_root / "data/forbes_ai50_seed.json"  # Same file
+                content_text = local_path.read_text()
+            
+            # Parse JSON
+            companies_data = json.loads(content_text)
+            
+            # Extract just company IDs (not full data)
+            company_ids = []
+            for company in companies_data:
+                # Extract company_id from website or use company_name
+                from urllib.parse import urlparse
+                if 'company_id' in company:
+                    company_ids.append(company['company_id'])
                 else:
-                    raise ValueError(f"Company seed data not found locally: {local_path}")
-
-            # Parse JSON and extract company IDs
-            seed_data = json.loads(content_text)
-            company_ids = [company["company_name"] for company in seed_data]
-            content_text = json.dumps(company_ids, indent=2)
-
+                    # Derive from website domain
+                    domain = urlparse(company.get('website', '')).netloc
+                    company_id = domain.replace("www.", "").split(".")[0]
+                    company_ids.append(company_id)
+            
+            # Return just the IDs array
+            contents = [{
+                "type": "text",
+                "text": json.dumps(company_ids)  # ["abridge", "anthropic", ...]
+            }]
+                
         else:
             raise ValueError(f"Resource handler not implemented for: {resource_id}")
-        
+                
         # Parse content based on MIME type
         if metadata.get("mimeType") == "application/json":
             content_data = json.loads(content_text)
