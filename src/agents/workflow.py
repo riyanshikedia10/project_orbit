@@ -193,12 +193,24 @@ class DataGeneratorNode(WorkflowNode):
     async def execute(self, state: WorkflowState) -> NodeResult:
         """Generate dashboard data."""
         self.status = NodeStatus.RUNNING
-        logger.info(f"Executing {self.name} node for {state.company_name}")
+        logger.info(f"🔄 Executing {self.name} node")
+        logger.info(f"   Company Name: '{state.company_name}'")
+        logger.info(f"   Company ID: '{state.company_id}'")
         
         try:
             # Generate dashboard using RAG pipeline
+            # Use company_id for vector DB lookup (matches source_path format like "anthropic/homepage")
+            # Use company_name for LLM display (better for generating proper company name in output)
+            company_identifier = state.company_id if state.company_id else state.company_name.lower().replace(" ", "_")
+            logger.info(f"   📌 Using company_identifier='{company_identifier}' for vector DB lookup")
+            logger.info(f"   📌 Using company_display_name='{state.company_name}' for LLM prompt")
+            
             generate_dashboard, _ = _get_rag_pipeline()
-            dashboard = generate_dashboard(state.company_name)
+            logger.info(f"   🚀 Calling generate_dashboard(company_identifier='{company_identifier}', company_display_name='{state.company_name}')")
+            dashboard = generate_dashboard(company_identifier, company_display_name=state.company_name)
+            
+            logger.info(f"   ✅ Dashboard generated successfully ({len(dashboard)} characters)")
+            logger.info(f"   📊 Dashboard preview (first 200 chars): {dashboard[:200]}...")
             
             state.dashboard = dashboard
             
@@ -251,7 +263,9 @@ class RiskDetectorNode(WorkflowNode):
                 risk_signals.extend(company_risks)
             
             # Also check retrieved context for risks
-            contexts = retrieve_context(state.company_name, top_k=10)
+            # Use company_id for proper vector DB filtering (matches source_path format)
+            company_identifier = state.company_id if state.company_id else state.company_name.lower().replace(" ", "_")
+            contexts = retrieve_context(company_identifier, top_k=10)
             for ctx in contexts:
                 text = ctx.get("text", "")
                 ctx_risks = detect_risk_signals(text)

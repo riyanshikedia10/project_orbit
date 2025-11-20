@@ -333,8 +333,25 @@ async def generate_rag_dashboard(request: CompanyRequest):
     The dashboard is generated from unstructured data stored in the vector database.
     """
     try:
-        print(f"Generating dashboard for {request.company_name}")
-        dashboard = generate_dashboard(request.company_name)
+        logger.info(f"📋 RAG Dashboard Generation Request")
+        logger.info(f"   Company Name: '{request.company_name}'")
+        
+        # Get company_id for proper vector DB filtering (matches source_path format)
+        try:
+            logger.info(f"   🔍 Looking up company_id from company_name...")
+            company_id = get_company_id_from_name(request.company_name)
+            logger.info(f"   ✅ Found company_id: '{company_id}'")
+        except HTTPException:
+            # Fallback to lowercase company name if lookup fails
+            company_id = request.company_name.lower().replace(" ", "_")
+            logger.warning(f"   ⚠️  Company not found in seed file, using derived company_id: '{company_id}'")
+        
+        logger.info(f"   📌 Using company_id='{company_id}' for vector DB lookup")
+        logger.info(f"   📌 Using company_name='{request.company_name}' for LLM display")
+        
+        dashboard = generate_dashboard(company_id, company_display_name=request.company_name)
+        
+        logger.info(f"   ✅ Dashboard generated successfully ({len(dashboard)} characters)")
         print(dashboard)
         return DashboardResponse(
             company_name=request.company_name,
@@ -881,18 +898,31 @@ async def generate_dashboard_with_agent(request: AgentDashboardRequest):
         )
         
         # Step 2: Get or extract company_id
+        logger.info(f"📋 Dashboard Generation Request Received")
+        logger.info(f"   Requested Company Name: '{request.company_name}'")
+        logger.info(f"   Requested Company ID: '{request.company_id}'")
+        logger.info(f"   Query: '{request.query}'")
+        
         company_id = request.company_id
         if not company_id:
             try:
+                logger.info(f"   🔍 Looking up company_id from company_name...")
                 company_id = get_company_id_from_name(request.company_name)
+                logger.info(f"   ✅ Found company_id: '{company_id}'")
             except HTTPException:
                 # If company not found, try to extract from name
                 company_id = request.company_name.lower().replace(" ", "_")
+                logger.warning(f"   ⚠️  Company not found in seed file, using derived company_id: '{company_id}'")
+        else:
+            logger.info(f"   ✅ Using provided company_id: '{company_id}'")
+        
+        logger.info(f"   📌 Final company_id for workflow: '{company_id}'")
+        logger.info(f"   📌 Final company_name for workflow: '{request.company_name}'")
         
         # Step 3: Execute Supervisor Agent query
         query = request.query or f"Generate a comprehensive dashboard for {request.company_name}"
         
-        logger.info(f"Starting Supervisor Agent for query: '{query}' (company_id={company_id})")
+        logger.info(f"🤖 Starting Supervisor Agent for query: '{query}' (company_id={company_id})")
         agent_trace_obj = await agent.execute_query(query, company_id)
         
         # Convert ReActTrace to dict for response
@@ -921,9 +951,14 @@ async def generate_dashboard_with_agent(request: AgentDashboardRequest):
         logger.info(f"Supervisor Agent completed: {agent_trace_obj.total_steps} steps, success={agent_trace_obj.success}")
         
         # Step 4: Execute WorkflowGraph to generate dashboard
-        logger.info(f"Starting WorkflowGraph for {request.company_name}")
+        logger.info(f"🔄 Starting WorkflowGraph execution")
+        logger.info(f"   Company Name: '{request.company_name}'")
+        logger.info(f"   Company ID: '{company_id}'")
         workflow = WorkflowGraph()
         workflow_state = await workflow.execute(request.company_name, company_id)
+        
+        logger.info(f"   ✅ WorkflowGraph completed with status: {workflow_state.status.value}")
+        logger.info(f"   📊 Dashboard generated: {len(workflow_state.dashboard) if workflow_state.dashboard else 0} characters")
         
         # Get execution path
         execution_path = workflow.get_execution_path(workflow_state)
