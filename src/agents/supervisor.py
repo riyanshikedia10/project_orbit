@@ -7,12 +7,7 @@ This module implements a Supervisor Agent that can:
 - Log Thought → Action → Observation triplets for audit and debugging
 - Execute queries for companies and return structured responses
 
-The ReAct workflow follows this pattern:
-1. Thought: Agent reasons about what information is needed
-2. Action: Agent calls appropriate tool(s)
-3. Observation: Agent processes tool results
-4. Repeat until sufficient information is gathered
-5. Final Answer: Agent synthesizes findings
+NOW USES MCP SERVER FOR ALL TOOL CALLS INSTEAD OF DIRECT IMPORTS
 """
 
 # region imports
@@ -25,11 +20,13 @@ from enum import Enum
 import dotenv
 from openai import OpenAI
 
-from .tools import (
-    get_latest_structured_payload,
-    rag_search_company,
-    report_layoff_signal,
-)
+# REMOVE DIRECT TOOL IMPORTS - Now using MCP client
+# from .tools import (
+#     get_latest_structured_payload,
+#     rag_search_company,
+#     report_layoff_signal,
+# )
+
 from .models import (
     PayloadResponse,
     RAGSearchResponse,
@@ -37,6 +34,8 @@ from .models import (
     SignalReportResponse,
 )
 from .react_models import ReActStep, ReActTrace, ActionType
+from .cloud_logging import log_react_trace_to_cloud, log_react_step_to_cloud
+from .mcp_client import MCPClient  # ADD THIS IMPORT
 # endregion
 
 # region globals, environment variables, and logging
@@ -64,13 +63,17 @@ class SupervisorAgent:
     
     This agent manages dashboard queries and invokes tools in a structured
     reasoning loop, logging each step for transparency and debugging.
+    
+    NOW ROUTES ALL TOOL CALLS THROUGH MCP SERVER
     """
     
     def __init__(
         self,
         model: str = "gpt-4o-mini",
         max_iterations: int = 10,
-        enable_llm_reasoning: bool = True
+        enable_llm_reasoning: bool = True,
+        mcp_url: str = None,
+        mcp_api_key: str = None
     ):
         """
         Initialize the Supervisor Agent.
@@ -79,19 +82,25 @@ class SupervisorAgent:
             model: OpenAI model to use for reasoning (default: "gpt-4o-mini")
             max_iterations: Maximum number of ReAct steps before stopping
             enable_llm_reasoning: Whether to use LLM for thought generation
+            mcp_url: MCP server URL (default: from env MCP_BASE)
+            mcp_api_key: MCP API key (default: from env MCP_API_KEY)
         """
         self.model = model
         self.max_iterations = max_iterations
         self.enable_llm_reasoning = enable_llm_reasoning
         
-        # Register available tools
+        # Initialize MCP client instead of direct tool registry
+        self.mcp_client = MCPClient(base_url=mcp_url, api_key=mcp_api_key)
+        
+        # Tool registry now maps to MCP client methods
         self.tools: Dict[str, Callable[..., Awaitable[Any]]] = {
-            "get_latest_structured_payload": get_latest_structured_payload,
-            "rag_search_company": rag_search_company,
-            "report_layoff_signal": report_layoff_signal,
+            "get_latest_structured_payload": self.mcp_client.get_latest_structured_payload,
+            "rag_search_company": self.mcp_client.rag_search_company,
+            "report_layoff_signal": self.mcp_client.report_layoff_signal,
         }
         
         logger.info(f"SupervisorAgent initialized with model={model}, max_iterations={max_iterations}")
+        logger.info(f"MCP integration enabled: {self.mcp_client.base_url}")
     
     async def execute_query(
         self,
@@ -162,6 +171,17 @@ class SupervisorAgent:
                 trace.steps.append(step)
                 logger.info(f"Step {step_number}: {action_type.value} - {thought[:100]}...")
                 
+                # Log step to Cloud Logging (if enabled)
+                try:
+                    log_react_step_to_cloud(
+                        step=step,
+                        company_id=company_id,
+                        query=query,
+                        severity="INFO" if not error else "WARNING"
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to log step to Cloud Logging: {e}")
+                
                 # Update context with observation
                 if observation:
                     context.append(f"Step {step_number}: {observation}")
@@ -186,12 +206,24 @@ class SupervisorAgent:
             
             logger.info(f"ReAct workflow completed: {trace.total_steps} steps, success={trace.success}")
             
+            # Log complete trace to Cloud Logging (if enabled)
+            try:
+                log_react_trace_to_cloud(trace, severity="INFO")
+            except Exception as e:
+                logger.debug(f"Failed to log trace to Cloud Logging: {e}")
+            
         except Exception as e:
             logger.error(f"Error in ReAct workflow: {e}", exc_info=True)
             trace.completed_at = datetime.now()
             trace.total_steps = len(trace.steps)
             trace.success = False
             trace.final_answer = f"Error: {str(e)}"
+            
+            # Log failed trace to Cloud Logging (if enabled)
+            try:
+                log_react_trace_to_cloud(trace, severity="ERROR")
+            except Exception as log_error:
+                logger.debug(f"Failed to log error trace to Cloud Logging: {log_error}")
         
         return trace
     
@@ -348,12 +380,20 @@ class SupervisorAgent:
         try:
             if action_type == ActionType.GET_PAYLOAD:
                 company_id = action_input["company_id"]
-                result: PayloadResponse = await self.tools["get_latest_structured_payload"](company_id)
+                result: PayloadResponse = await self.mcp_client.get_latest_structured_payload(company_id)
                 
                 if result.found and result.payload:
+                    if result.payload.company_record:
+                        company_name = (
+                            result.payload.company_record.brand_name 
+                            or result.payload.company_record.legal_name 
+                            or 'N/A'
+                        )
+                    else:
+                        company_name = 'N/A'
                     return (
                         f"Retrieved structured payload for {company_id}. "
-                        f"Company: {result.payload.company.name if result.payload.company else 'N/A'}. "
+                        f"Company: {company_name}. "
                         f"Source: {result.source}.",
                         None
                     )
@@ -368,7 +408,7 @@ class SupervisorAgent:
                 query = action_input["query"]
                 top_k = action_input.get("top_k", 10)
                 
-                result: RAGSearchResponse = await self.tools["rag_search_company"](
+                result: RAGSearchResponse = await self.mcp_client.rag_search_company(
                     company_id, query, top_k
                 )
                 
@@ -387,7 +427,7 @@ class SupervisorAgent:
             
             elif action_type == ActionType.REPORT_SIGNAL:
                 signal_data: RiskSignal = action_input["signal_data"]
-                result: SignalReportResponse = await self.tools["report_layoff_signal"](signal_data)
+                result: SignalReportResponse = await self.mcp_client.report_layoff_signal(signal_data)
                 
                 return (
                     f"Risk signal reported. ID: {result.signal_id}, Status: {result.status}, "

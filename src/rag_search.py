@@ -5,7 +5,7 @@ Provides functions to query the Vector DB for contextual snippets.
 """
 import os
 from typing import List, Dict, Optional
-from services.embeddings import Embeddings, PineconeStorage
+from src.services.embeddings import Embeddings, PineconeStorage
 from pathlib import Path
 import dotenv
 
@@ -44,33 +44,28 @@ def rag_search_company(company_id: str, query: str, top_k: int = 10) -> List[Dic
     # Generate embedding for the query
     query_embedding = embeddings_client.embed_text(enhanced_query)
     
-    # Query Pinecone with company filter
-    filter_dict = {
-        "source_path": {"$regex": f"^{company_id}/"}
-    }
-    
     try:
         results = pinecone_storage.query(
             embedding=query_embedding,
-            top_k=top_k * 2,  # Get more to filter
-            filter_dict=filter_dict
+            top_k=top_k * 3,  # Get more to filter
+            filter_dict=None
         )
         
-        # If filtered results are empty, try without filter
-        if not results:
-            results = pinecone_storage.query(
-                embedding=query_embedding,
-                top_k=top_k
-            )
-            # Filter by company name in source_path manually
-            company_results = [
-                r for r in results 
-                if company_id.lower() in r.get("source_path", "").lower()
-            ]
-            if company_results:
-                results = company_results[:top_k]
+        # Filter by company name in source_path manually
+        company_results = [
+            r for r in results 
+            if company_id.lower() in r.get("source_path", "").lower()
+        ]
         
-        return results[:top_k]
+        # If we have company-specific results, use them
+        if company_results:
+            return company_results[:top_k]
+        else:
+            # If no company-specific results, return top results anyway
+            return results[:top_k]
+
+        
+       
         
     except Exception as e:
         print(f"⚠️  Error querying vector DB: {e}")
