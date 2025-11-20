@@ -155,38 +155,64 @@ def search_risks_in_company(company_id: str, risk_type: Optional[str] = None) ->
         risk_type: Specific risk type to search for (optional)
         
     Returns:
-        List of detected risk signals
+        List of detected risk signals (empty list if none found)
     """
-    # Search for risk-related content
-    if risk_type:
-        query = f"{risk_type} risk"
-    else:
-        query = "layoff security breach risk"
-    
-    # Use RAG to find relevant content
-    from rag_search import rag_search_company
-    results = rag_search_company(company_id, query, top_k=20)
-    
-    all_risks = []
-    for result in results:
-        text = result.get("text", "")
-        risks = detect_risk_signals(text, risk_type)
+    try:
+        print(f"🔍 [risk_detection] Starting risk search for company_id='{company_id}', risk_type='{risk_type}'")
         
-        for risk in risks:
-            risk["source_path"] = result.get("source_path")
-            risk["score"] = result.get("score", 0)
-            all_risks.append(risk)
-    
-    # Remove duplicates (same risk type from same source)
-    seen = set()
-    unique_risks = []
-    for risk in all_risks:
-        key = (risk["risk_type"], risk["source_path"])
-        if key not in seen:
-            seen.add(key)
-            unique_risks.append(risk)
-    
-    return unique_risks
+        # Search for risk-related content
+        if risk_type:
+            query = f"{risk_type} risk"
+        else:
+            query = "layoff security breach risk"
+        
+        print(f"🔍 [risk_detection] Query: '{query}'")
+        
+        # Use RAG to find relevant content
+        from src.rag_search import rag_search_company
+        print(f"🔍 [risk_detection] Calling rag_search_company(company_id='{company_id}', query='{query}', top_k=20)")
+        
+        results = rag_search_company(company_id, query, top_k=20)
+        print(f"🔍 [risk_detection] Retrieved {len(results)} results from rag_search_company")
+        
+        all_risks = []
+        for i, result in enumerate(results, 1):
+            text = result.get("text", "")
+            if not text:
+                continue
+            
+            print(f"🔍 [risk_detection] Processing result {i}/{len(results)}: {len(text)} chars")
+            risks = detect_risk_signals(text, risk_type)
+            
+            if risks:
+                print(f"🔍 [risk_detection] Found {len(risks)} risk signals in result {i}")
+            
+            for risk in risks:
+                risk["source_path"] = result.get("source_path")
+                risk["score"] = result.get("score", 0)
+                all_risks.append(risk)
+        
+        print(f"🔍 [risk_detection] Total risks found (before deduplication): {len(all_risks)}")
+        
+        # Remove duplicates (same risk type from same source)
+        seen = set()
+        unique_risks = []
+        for risk in all_risks:
+            key = (risk.get("risk_type"), risk.get("source_path"))
+            if key not in seen:
+                seen.add(key)
+                unique_risks.append(risk)
+        
+        print(f"🔍 [risk_detection] Unique risks after deduplication: {len(unique_risks)}")
+        print(f"🔍 [risk_detection] Returning {len(unique_risks)} unique risks")
+        
+        return unique_risks
+        
+    except Exception as e:
+        print(f"❌ [risk_detection] Error in search_risks_in_company: {e}")
+        import traceback
+        traceback.print_exc()
+        return []  # Return empty list on error
 
 
 if __name__ == "__main__":
@@ -198,7 +224,7 @@ if __name__ == "__main__":
     test_company = "anthropic"
     print(f"Searching for risks in: {test_company}")
     
-    risks = search_risks_in_company(test_company)
+    risks = search_risks_in_company(test_company, "security")
     
     if risks:
         print(f"\n🚨 Found {len(risks)} risk signals:")

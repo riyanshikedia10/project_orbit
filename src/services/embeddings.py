@@ -2,12 +2,16 @@ import os
 import dotenv
 from openai import OpenAI
 from openai import RateLimitError, APIError, APIConnectionError, APITimeoutError
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pinecone import Pinecone, ServerlessSpec
 import hashlib
 import time
 import random
+import logging
+
 dotenv.load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -17,11 +21,30 @@ EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX = os.getenv("PINECONE_INDEX")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Global client instances (lazy initialization)
+_openai_client: Optional[OpenAI] = None
+_pinecone_client: Optional[Pinecone] = None
+_pinecone_index = None
+
+def _get_openai_client() -> OpenAI:
+    """Get or create a singleton OpenAI client."""
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        logger.debug("OpenAI client initialized")
+    return _openai_client
+
 
 class Embeddings:
     def __init__(self, max_retries: int = 5, base_delay: float = 0.2, max_delay: float = 30.0):
-        self.client = client
+        """
+        Initialize Embeddings client.
+        
+        Uses a singleton OpenAI client to avoid multiple instantiations.
+        """
+        self.client = _get_openai_client()
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
@@ -80,40 +103,79 @@ class Embeddings:
         if last_exception:
             raise last_exception
 
-class PineconeStorage:
-
-    def __init__(self):
-        self.check_environment()
-        self.client = Pinecone(api_key=PINECONE_API_KEY)
-        self.index = self.initialize_index()
-    
-
-    def check_environment(self):
+def _get_pinecone_client() -> Pinecone:
+    """Get or create a singleton Pinecone client."""
+    global _pinecone_client
+    if _pinecone_client is None:
         if not PINECONE_API_KEY:
-            raise ValueError("PINECONE_API_KEY is not set")
+            raise ValueError("PINECONE_API_KEY environment variable is not set")
+        _pinecone_client = Pinecone(api_key=PINECONE_API_KEY)
+        logger.debug("Pinecone client initialized")
+    return _pinecone_client
+
+
+def _get_pinecone_index():
+    """Get or initialize a singleton Pinecone index."""
+    global _pinecone_index
+    if _pinecone_index is None:
         if not PINECONE_INDEX:
-            raise ValueError("PINECONE_INDEX is not set")
+            raise ValueError("PINECONE_INDEX environment variable is not set")
         
-        return True
-    
-    def initialize_index(self):
+        client = _get_pinecone_client()
+        
         # Check if index exists by listing all indexes
-        existing_indexes = [idx.name for idx in self.client.list_indexes()]
+        try:
+            existing_indexes = [idx.name for idx in client.list_indexes()]
+        except Exception as e:
+            logger.error(f"Failed to list Pinecone indexes: {e}")
+            raise
         
         if PINECONE_INDEX not in existing_indexes:
-            print(f"Index {PINECONE_INDEX} not found. Creating...")
-            self.client.create_index(
-                name=PINECONE_INDEX,
-                dimension=EMBEDDING_DIMENSION,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
-            )
-            print(f"Index {PINECONE_INDEX} created")
+            logger.info(f"Index {PINECONE_INDEX} not found. Creating...")
+            try:
+                client.create_index(
+                    name=PINECONE_INDEX,
+                    dimension=EMBEDDING_DIMENSION,
+                    metric="cosine",
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                )
+                logger.info(f"Index {PINECONE_INDEX} created")
+            except Exception as e:
+                logger.error(f"Failed to create Pinecone index: {e}")
+                raise
         else:
-            print(f"Index {PINECONE_INDEX} already exists")
+            logger.debug(f"Index {PINECONE_INDEX} already exists")
         
-        self.index = self.client.Index(PINECONE_INDEX)
-        return self.index
+        _pinecone_index = client.Index(PINECONE_INDEX)
+        logger.debug(f"Pinecone index '{PINECONE_INDEX}' initialized")
+    
+    return _pinecone_index
+
+
+class PineconeStorage:
+    """
+    Pinecone storage client with singleton pattern for client and index.
+    
+    Multiple instances of this class will share the same underlying
+    Pinecone client and index to avoid resource waste.
+    """
+
+    def __init__(self):
+        """
+        Initialize PineconeStorage.
+        
+        Uses singleton clients to avoid multiple connections.
+        """
+        # Validate environment variables
+        if not PINECONE_API_KEY:
+            raise ValueError("PINECONE_API_KEY environment variable is not set")
+        if not PINECONE_INDEX:
+            raise ValueError("PINECONE_INDEX environment variable is not set")
+        
+        # Use singleton client and index
+        self.client = _get_pinecone_client()
+        self.index = _get_pinecone_index()
+    
     def store_embedding(self, text: str, embedding: List[float], id: str = None, source_path: str = None):
         """
         Store an embedding in Pinecone.

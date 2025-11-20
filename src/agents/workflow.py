@@ -286,8 +286,12 @@ class RiskDetectorNode(WorkflowNode):
             state.risk_signals = unique_risks
             state.risk_detected = len(unique_risks) > 0
             
+            logger.info(f"   ✅ Risk detection completed: {len(unique_risks)} risks found, risk_detected={state.risk_detected}")
+            logger.info(f"   📊 Next node will be: {'hitl_pause' if state.risk_detected else 'evaluator'}")
+
             self.status = NodeStatus.COMPLETED
-            return NodeResult(
+            logger.info(f"   🔄 Risk detector returning NodeResult with status {self.status}")
+            result = NodeResult(
                 node_name=self.name,
                 status=self.status,
                 output={
@@ -297,6 +301,8 @@ class RiskDetectorNode(WorkflowNode):
                 },
                 metadata={"detected_at": datetime.now().isoformat()}
             )
+            logger.info(f"   ✅ Risk detector NodeResult created, returning now")
+            return result
         except Exception as e:
             self.status = NodeStatus.FAILED
             logger.error(f"Error in {self.name}: {e}")
@@ -327,82 +333,77 @@ class HITLPauseNode(WorkflowNode):
         """Pause workflow and wait for human approval."""
         self.status = NodeStatus.RUNNING
         logger.info(f"Executing {self.name} node - pausing for approval")
-        
-        try:
-            # Generate approval ID
-            import uuid
-            approval_id = str(uuid.uuid4())
-            state.hitl_approval_id = approval_id
-            state.status = WorkflowStatus.PAUSED_FOR_APPROVAL
-            
-            # Create approval request
-            approval_request = {
-                "approval_id": approval_id,
-                "company_name": state.company_name,
-                "risk_count": len(state.risk_signals),
-                "risks": state.risk_signals[:5],  # Show top 5 risks
-                "dashboard_preview": state.dashboard[:500] if state.dashboard else None,
-                "paused_at": datetime.now().isoformat()
-            }
-            
-            # Save approval request to file (for HITL system)
-            self._save_approval_request(approval_request)
-            
-            # Log HITL pause event
+        logger.info(f"   🏢 Company: {state.company_name}")
+        logger.info(f"   ⚠️  Risks detected: {len(state.risk_signals)}")
+        logger.info(f"   ⏱️  Timeout: 30 seconds")
+
+        # Generate approval ID
+        import uuid
+        approval_id = str(uuid.uuid4())
+        logger.info(f"   🆔 Approval ID: {approval_id}")
+        state.hitl_approval_id = approval_id
+        state.status = WorkflowStatus.PAUSED_FOR_APPROVAL
+
+        # Create approval request
+        approval_request = {
+            "approval_id": approval_id,
+            "company_name": state.company_name,
+            "risk_count": len(state.risk_signals),
+            "risks": state.risk_signals[:5],  # Show top 5 risks
+            "dashboard_preview": state.dashboard[:500] if state.dashboard else None,
+            "paused_at": datetime.now().isoformat()
+        }
+
+        # Save approval request to file (for HITL system)
+        self._save_approval_request(approval_request)
+
+        # Log HITL pause event
+        logger.info(
+            f"HITL_PAUSE: Workflow paused for approval. "
+            f"Approval ID: {approval_id}, Company: {state.company_name}, "
+            f"Risk Count: {len(state.risk_signals)}"
+        )
+
+        # If callback provided, use it; otherwise wait for file-based approval
+        if self.approval_callback:
+            approved = await self.approval_callback(approval_id)
+        else:
+            # Wait for approval file to be created/updated
+            approved = await self._wait_for_approval(approval_id)
+
+        state.hitl_approved = approved
+
+        if approved:
+            state.status = WorkflowStatus.APPROVED
+            self.status = NodeStatus.COMPLETED
+
+            # Log HITL approval event
             logger.info(
-                f"HITL_PAUSE: Workflow paused for approval. "
-                f"Approval ID: {approval_id}, Company: {state.company_name}, "
-                f"Risk Count: {len(state.risk_signals)}"
+                f"HITL_APPROVED: Approval granted. "
+                f"Approval ID: {approval_id}, Company: {state.company_name}"
             )
-            
-            # If callback provided, use it; otherwise wait for file-based approval
-            if self.approval_callback:
-                approved = await self.approval_callback(approval_id)
-            else:
-                # Wait for approval file to be created/updated
-                approved = await self._wait_for_approval(approval_id)
-            
-            state.hitl_approved = approved
-            
-            if approved:
-                state.status = WorkflowStatus.APPROVED
-                self.status = NodeStatus.COMPLETED
-                
-                # Log HITL approval event
-                logger.info(
-                    f"HITL_APPROVED: Approval granted. "
-                    f"Approval ID: {approval_id}, Company: {state.company_name}"
-                )
-                
-                return NodeResult(
-                    node_name=self.name,
-                    status=self.status,
-                    output={"approved": True, "approval_id": approval_id},
-                    metadata={"approved_at": datetime.now().isoformat()}
-                )
-            else:
-                state.status = WorkflowStatus.REJECTED
-                self.status = NodeStatus.COMPLETED
-                
-                # Log HITL rejection event
-                logger.warning(
-                    f"HITL_REJECTED: Approval denied. "
-                    f"Approval ID: {approval_id}, Company: {state.company_name}"
-                )
-                
-                return NodeResult(
-                    node_name=self.name,
-                    status=self.status,
-                    output={"approved": False, "approval_id": approval_id},
-                    metadata={"rejected_at": datetime.now().isoformat()}
-                )
-        except Exception as e:
-            self.status = NodeStatus.FAILED
-            logger.error(f"Error in {self.name}: {e}")
+
             return NodeResult(
                 node_name=self.name,
                 status=self.status,
-                error=str(e)
+                output={"approved": True, "approval_id": approval_id},
+                metadata={"approved_at": datetime.now().isoformat()}
+            )
+        else:
+            state.status = WorkflowStatus.REJECTED
+            self.status = NodeStatus.COMPLETED
+
+            # Log HITL rejection event
+            logger.warning(
+                f"HITL_REJECTED: Approval denied (timed out). "
+                f"Approval ID: {approval_id}, Company: {state.company_name}"
+            )
+
+            return NodeResult(
+                node_name=self.name,
+                status=self.status,
+                output={"approved": False, "approval_id": approval_id},
+                metadata={"rejected_at": datetime.now().isoformat()}
             )
     
     def _save_approval_request(self, request: Dict) -> None:
@@ -417,14 +418,17 @@ class HITLPauseNode(WorkflowNode):
         
         logger.info(f"Saved approval request to {approval_file}")
     
-    async def _wait_for_approval(self, approval_id: str, timeout: int = 300) -> bool:
+    async def _wait_for_approval(self, approval_id: str, timeout: int = 30) -> bool:
         """Wait for approval file to be updated (for testing)."""
         import asyncio
         import time
-        
+
         project_root = Path(__file__).resolve().parents[2]
         approval_file = project_root / "data" / "hitl_approvals" / f"{approval_id}.json"
-        
+
+        logger.info(f"   ⏳ Waiting for approval file: {approval_file}")
+        logger.info(f"   ⏱️  Timeout: {timeout} seconds")
+
         start_time = time.time()
         while time.time() - start_time < timeout:
             if approval_file.exists():
@@ -432,12 +436,14 @@ class HITLPauseNode(WorkflowNode):
                     with open(approval_file, 'r') as f:
                         data = json.load(f)
                     if "approved" in data:
+                        logger.info(f"   ✅ Found approval decision: {data['approved']}")
                         return data["approved"]
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"   ⚠️  Error reading approval file: {e}")
             await asyncio.sleep(1)
-        
+
         # Timeout: default to False (reject)
+        logger.warning(f"   ⏰ Timeout reached after {timeout} seconds - rejecting")
         return False
     
     def get_next_nodes(self, state: WorkflowState) -> List[str]:
@@ -457,10 +463,13 @@ class EvaluatorNode(WorkflowNode):
     
     async def execute(self, state: WorkflowState) -> NodeResult:
         """Evaluate and finalize dashboard."""
+        logger.info(f"   🚀 Starting EvaluatorNode.execute() for {state.company_name}")
         self.status = NodeStatus.RUNNING
         logger.info(f"Executing {self.name} node for {state.company_name}")
-        
+
         try:
+            logger.info(f"   📋 Evaluating dashboard (length: {len(state.dashboard) if state.dashboard else 0})")
+
             # Validate dashboard has all required sections
             required_sections = [
                 "## Company Overview",
@@ -472,13 +481,18 @@ class EvaluatorNode(WorkflowNode):
                 "## Outlook",
                 "## Disclosure Gaps"
             ]
-            
+
+            logger.info(f"   📋 Checking for {len(required_sections)} required sections...")
+
             missing_sections = []
             if state.dashboard:
                 for section in required_sections:
                     if section not in state.dashboard:
                         missing_sections.append(section)
-            
+                        logger.warning(f"   ⚠️  Missing section: {section}")
+                    else:
+                        logger.debug(f"   ✅ Found section: {section}")
+
             evaluation = {
                 "dashboard_complete": len(missing_sections) == 0,
                 "missing_sections": missing_sections,
@@ -486,17 +500,23 @@ class EvaluatorNode(WorkflowNode):
                 "risk_count": len(state.risk_signals),
                 "hitl_approved": state.hitl_approved if state.risk_detected else None
             }
-            
+
+            logger.info(f"   ✅ Evaluation complete: dashboard_complete={evaluation['dashboard_complete']}")
+            logger.info(f"   📊 Missing sections: {len(missing_sections)}")
+
             self.status = NodeStatus.COMPLETED
-            return NodeResult(
+            logger.info(f"   🔄 EvaluatorNode status set to {self.status}")
+            result = NodeResult(
                 node_name=self.name,
                 status=self.status,
                 output=evaluation,
                 metadata={"evaluated_at": datetime.now().isoformat()}
             )
+            logger.info(f"   ✅ EvaluatorNode NodeResult created, returning now")
+            return result
         except Exception as e:
-            self.status = NodeStatus.FAILED
             logger.error(f"Error in {self.name}: {e}")
+            self.status = NodeStatus.FAILED
             return NodeResult(
                 node_name=self.name,
                 status=self.status,
@@ -505,6 +525,8 @@ class EvaluatorNode(WorkflowNode):
     
     def get_next_nodes(self, state: WorkflowState) -> List[str]:
         """After evaluation, workflow is complete."""
+        logger.info(f"   📋 EvaluatorNode.get_next_nodes() called")
+        logger.info(f"   📍 Returning empty list (workflow complete)")
         return []
 
 
@@ -568,28 +590,38 @@ class WorkflowGraph:
                 state.current_node = current_node_name
                 
                 # Execute current node
+                logger.info(f"   🚀 Starting execution of node: {current_node_name}")
                 node = self.nodes[current_node_name]
+                logger.info(f"   📋 Calling node.execute() for {current_node_name}...")
                 result = await node.execute(state)
+                logger.info(f"   ✅ Node.execute() returned for {current_node_name}")
                 state.node_results[current_node_name] = result
-                
+
                 logger.info(f"Node {current_node_name} completed with status {result.status}")
-                
+
                 # Check if node failed
                 if result.status == NodeStatus.FAILED:
+                    logger.error(f"   ❌ Node {current_node_name} failed with error: {result.error}")
                     state.status = WorkflowStatus.FAILED
                     state.completed_at = datetime.now()
                     return state
-                
+
                 # Determine next nodes
+                logger.info(f"   🔄 Determining next nodes from {current_node_name}...")
+                logger.info(f"   📋 Calling node.get_next_nodes() for {current_node_name}...")
                 next_nodes = node.get_next_nodes(state)
-                
+                logger.info(f"   📍 Next nodes: {next_nodes}")
+
                 # If no next nodes, workflow is complete
                 if not next_nodes:
+                    logger.info(f"   ✅ No next nodes - workflow complete")
                     break
-                
+
                 # Move to first next node (for now, we handle one path)
                 # In a more complex system, we might execute multiple paths in parallel
                 current_node_name = next_nodes[0] if next_nodes else None
+                logger.info(f"   ➡️  Moving to next node: {current_node_name}")
+                logger.info(f"   🔄 Continuing to next iteration of while loop...")
             
             # Workflow completed - set to COMPLETED if it was running or approved (approved means we continued after HITL)
             if state.status in [WorkflowStatus.RUNNING, WorkflowStatus.PAUSED_FOR_APPROVAL, WorkflowStatus.APPROVED]:
