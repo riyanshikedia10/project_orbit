@@ -117,6 +117,20 @@ async def execute_agent(request: AgentExecuteRequest):
         )
 
 
+@app.get("/", tags=["Root"])
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "Project Orbit Agent Service",
+        "version": "0.1.0",
+        "endpoints": {
+            "execute": "/execute",
+            "health": "/health",
+            "docs": "/docs"
+        }
+    }
+
+
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Health check endpoint"""

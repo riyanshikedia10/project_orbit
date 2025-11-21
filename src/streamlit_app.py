@@ -8,8 +8,15 @@ st.set_page_config(page_title="Project Orbit", layout="wide")
 st.title("Project ORBIT – PE Dashboard for Forbes AI 50")
 
 try:
-    companies = requests.get(f"{API_BASE}/companies", timeout=5).json()
-except Exception:
+    companies = requests.get(f"{API_BASE}/companies", timeout=30).json()
+except requests.exceptions.Timeout:
+    st.warning(f"⏱️ API service timeout. The service may be starting up. Please try again in a moment.")
+    companies = []
+except requests.exceptions.ConnectionError:
+    st.error(f"🔌 Cannot connect to API service at {API_BASE}. Please verify the service is running.")
+    companies = []
+except Exception as e:
+    st.warning(f"⚠️ Could not load companies from API: {str(e)}. Loading from local files.")
     companies = []
 
 names = [c["company_name"] for c in companies] if companies else ["ExampleAI"]

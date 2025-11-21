@@ -85,7 +85,16 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
     --role="roles/run.invoker"
 
 echo "🔨 Building Docker image with Cloud Build (avoids cross-platform issues)..."
-gcloud builds submit --tag gcr.io/$PROJECT_ID/project-orbit:latest
+# Create temporary cloudbuild config for main API
+cat > /tmp/cloudbuild-api.yaml << EOF
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-f', 'Dockerfile.api', '-t', 'gcr.io/$PROJECT_ID/project-orbit:latest', '.']
+images:
+- 'gcr.io/$PROJECT_ID/project-orbit:latest'
+EOF
+gcloud builds submit --config=/tmp/cloudbuild-api.yaml
+rm /tmp/cloudbuild-api.yaml
 
 echo "🚀 Building MCP Server image..."
 # Create temporary cloudbuild config for MCP
@@ -129,24 +138,6 @@ echo "✅ MCP Server deployed!"
 MCP_URL=$(gcloud run services describe project-orbit-mcp --region "$REGION" --format="value(status.url)")
 echo "🌐 MCP Server URL: $MCP_URL"
 
-echo "🚀 Deploying API service..."
-gcloud run deploy project-orbit-api \
-    --image gcr.io/$PROJECT_ID/project-orbit:latest \
-    --platform managed \
-    --region $REGION \
-    --allow-unauthenticated \
-    --service-account=${SERVICE_ACCOUNT_EMAIL} \
-    --port 8000 \
-    --memory 1Gi \
-    --cpu 1 \
-    --timeout 300 \
-    --max-instances 5 \
-    --set-env-vars="PYTHONPATH=/app/src:/app,OPENAI_API_KEY=$OPENAI_API_KEY,PINECONE_API_KEY=$PINECONE_API_KEY,PINECONE_INDEX=$PINECONE_INDEX,EMBEDDING_MODEL=$EMBEDDING_MODEL,EMBEDDING_DIMENSION=$EMBEDDING_DIMENSION,GCS_BUCKET_NAME=$GCS_BUCKET_NAME,PROJECT_ID=$PROJECT_ID,GCS_SEED_FILE_PATH=$GCS_SEED_FILE_PATH,LLM_MODEL=$LLM_MODEL,OPENAI_MODEL=$OPENAI_MODEL,MCP_BASE=$MCP_URL,V2_MASTER_FOLDER=$V2_MASTER_FOLDER"
-
-echo "✅ API service redeployed!"
-API_URL=$(gcloud run services describe project-orbit-api --region "$REGION" --format="value(status.url)")
-echo "🌐 API Service URL: $API_URL"
-
 echo "🚀 Deploying Agent Service..."
 gcloud run deploy project-orbit-agent \
     --image gcr.io/$PROJECT_ID/project-orbit-agent:latest \
@@ -164,6 +155,25 @@ gcloud run deploy project-orbit-agent \
 echo "✅ Agent Service deployed!"
 AGENT_URL=$(gcloud run services describe project-orbit-agent --region "$REGION" --format="value(status.url)")
 echo "🌐 Agent Service URL: $AGENT_URL"
+
+echo "🚀 Deploying API service..."
+gcloud run deploy project-orbit-api \
+    --image gcr.io/$PROJECT_ID/project-orbit:latest \
+    --platform managed \
+    --region $REGION \
+    --allow-unauthenticated \
+    --service-account=${SERVICE_ACCOUNT_EMAIL} \
+    --port 8000 \
+    --memory 1Gi \
+    --cpu 1 \
+    --timeout 300 \
+    --min-instances 0 \
+    --max-instances 5 \
+    --set-env-vars="PYTHONPATH=/app/src:/app,OPENAI_API_KEY=$OPENAI_API_KEY,PINECONE_API_KEY=$PINECONE_API_KEY,PINECONE_INDEX=$PINECONE_INDEX,EMBEDDING_MODEL=$EMBEDDING_MODEL,EMBEDDING_DIMENSION=$EMBEDDING_DIMENSION,GCS_BUCKET_NAME=$GCS_BUCKET_NAME,PROJECT_ID=$PROJECT_ID,GCS_SEED_FILE_PATH=$GCS_SEED_FILE_PATH,LLM_MODEL=$LLM_MODEL,OPENAI_MODEL=$OPENAI_MODEL,MCP_BASE=$MCP_URL,AGENT_BASE=$AGENT_URL,V2_MASTER_FOLDER=$V2_MASTER_FOLDER"
+
+echo "✅ API service redeployed!"
+API_URL=$(gcloud run services describe project-orbit-api --region "$REGION" --format="value(status.url)")
+echo "🌐 API Service URL: $API_URL"
 
 echo "🚀 Deploying Streamlit service..."
 gcloud run deploy project-orbit-streamlit \

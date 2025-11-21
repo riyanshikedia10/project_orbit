@@ -23,7 +23,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 
 # Copy the entire application code (FastAPI needs most of src/ folder)
 COPY src/ src/
-COPY config/ config/
 
 # Add src directory to Python path
 ENV PYTHONPATH=/app/src:/app
