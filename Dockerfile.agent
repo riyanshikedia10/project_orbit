@@ -6,6 +6,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install minimal system dependencies
+<<<<<<< HEAD
 RUN apt-get update --fix-missing || true && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -13,6 +14,15 @@ RUN apt-get update --fix-missing || true && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/archives/*
+=======
+# RUN apt-get update --fix-missing || true && \
+#     apt-get install -y --no-install-recommends \
+#     curl \
+#     ca-certificates \
+#     && apt-get clean \
+#     && rm -rf /var/lib/apt/lists/* \
+#     && rm -rf /var/cache/apt/archives/*
+>>>>>>> 9c4bbc86ab121aac462482e085f6b065296aa189
 
 # Copy requirements first for better Docker layer caching
 COPY requirements.txt .
@@ -21,8 +31,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
+<<<<<<< HEAD
 # Copy the entire application code
 COPY . .
+=======
+# Create src directory structure
+RUN mkdir -p src/agents src
+
+# Copy agent service and agents module
+COPY src/agent_service.py src/
+COPY src/agents/ src/agents/
+COPY config/ config/
+>>>>>>> 9c4bbc86ab121aac462482e085f6b065296aa189
 
 # Add src directory to Python path
 ENV PYTHONPATH=/app/src:/app
@@ -37,9 +57,19 @@ USER app
 # Expose agent service port
 EXPOSE 8002
 
+<<<<<<< HEAD
 # Health check to ensure the service is running
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8002/health || exit 1
 
 # Default command - runs the main API (which contains agent endpoints)
 CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]
+=======
+# Health check to ensure the service is running (using Python instead of curl)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health').read()" || exit 1
+
+# Default command for Agent Service
+CMD ["uvicorn", "src.agent_service:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]
+
+>>>>>>> 9c4bbc86ab121aac462482e085f6b065296aa189
