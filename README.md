@@ -20,6 +20,8 @@ Project Links:
 - [Backend URL](https://project-orbit-api-267172092995.us-central1.run.app/)
 - [Codelabs URL](https://codelabs-preview.appspot.com/?file_id=1fJQ9WLgnQXVG3YemeyStNl_OwPcw3P26Czc2PUDOOlg)
 - [Video Link(Contains Demo)](https://drive.google.com/drive/folders/1uC8_yFrUPNdrogmC9K39u_j6KXZdEiel)
+- [HITL URL](https://project-orbit-hitl-267172092995.us-central1.run.app/)
+
 
 ---
 
