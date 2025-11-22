@@ -4,6 +4,8 @@
 
 Automating Private-Equity (PE) Intelligence for the Forbes AI 50
 
+In the first version of the project, we have built two pipelines from scraped sources of the 50 Forbes AI Websites -- Structured Payloads and Unstructured RAG Data Pipelines. In this version (V2), we have expanded dashbaord generation through Airflow Based Task Orchestration and Agentic AI Handling to Verify and primarily conduct **due-diligence** on the generated dashboards.
+
 **Project ORBIT** is a comprehensive, cloud-hosted system that automates private-equity intelligence gathering and analysis for the Forbes AI 50 startups. The platform has evolved from a static ETL pipeline (Assignment 4) to an **agentic, reasoning-based system** (Assignment 5) that:
 
 - **Orchestrates due-diligence workflows** through supervisory LLM agents
@@ -12,10 +14,12 @@ Automating Private-Equity (PE) Intelligence for the Forbes AI 50
 - **Runs under Airflow orchestration** with containerized MCP services
 - **Pauses for Human-in-the-Loop (HITL)** review when risks are detected
 
+Project Links:
+
 - [Application URL](https://project-orbit-streamlit-267172092995.us-central1.run.app/)
 - [Backend URL](https://project-orbit-api-267172092995.us-central1.run.app/)
 - [Codelabs URL](https://codelabs-preview.appspot.com/?file_id=1fJQ9WLgnQXVG3YemeyStNl_OwPcw3P26Czc2PUDOOlg)
-- [Video Link](https://drive.google.com/drive/folders/1uC8_yFrUPNdrogmC9K39u_j6KXZdEiel)
+- [Video Link(Contains Demo)](https://drive.google.com/drive/folders/1uC8_yFrUPNdrogmC9K39u_j6KXZdEiel)
 
 ---
 
@@ -75,7 +79,7 @@ flowchart TD
 - **Docker**: `Dockerfile.mcp`
 
 #### 2. **Supervisor Agent** (`src/agents/supervisor.py`)
-- **Purpose**: Orchestrates dashboard generation using ReAct pattern
+- **Purpose**: Orchestrates dashboard generation using **ReAct pattern**
 - **Features**:
   - Thought → Action → Observation loop
   - Structured logging with correlation IDs
@@ -118,17 +122,13 @@ Raw Website Data → Pydantic Models → JSON Payload → LLM → PE Dashboard
 ```
 ![Structured Pipeline](./assets/structured_pipeline.jpeg)
 
-### Data Flow
-
-![Data Flow](./assets/data_flow.png)
-
 ---
 
 ## Project Structure
 
 ```
 project_orbit/
-├── cloud_functions/        # Cloud Functions (Lab 2 & 3 - Scraping automation)
+├── cloud_functions/        # Cloud Functions (Lab 2 & 3 - Scraping automation - **Version 1**)
 │   ├── main.py            # Function entry points
 │   ├── requirements.txt   # Function dependencies
 │   └── src/               # Scraper and GCS utilities
@@ -238,22 +238,10 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 
 # Start Streamlit (in another terminal)
 streamlit run src/streamlit_app.py --server.port 8501
+
+# Start HITL Dashboard (in another terminal)
+streamlit run src/hitl_dashboard.py --server.port 8502
 ```
-
-### Lab 2 & 3: Cloud Functions + Cloud Scheduler
-
-For detailed setup instructions, see [CLOUD_FUNCTIONS_DOCUMENTATION.md](./CLOUD_FUNCTIONS_DOCUMENTATION.md)
-
-**Quick steps:**
-1. Enable APIs: `bash scripts/enable_apis.sh`
-2. Copy source code: `cp -r src cloud_functions/src`
-3. Set bucket config: `echo 'BUCKET_NAME="project-orbit-data-12345"' > .gcs_config`
-4. Deploy functions: `bash scripts/deploy_functions.sh`
-5. Create schedulers: `bash scripts/create_schedulers.sh`
-
-**Functions**:
-- **full_ingest**: Full-load scraping for all 50 companies (manual trigger)
-- **daily_refresh**: Daily refresh of key pages (runs at 3 AM UTC)
 
 ---
 
@@ -572,19 +560,6 @@ This script:
 
 ---
 
-## Demo Video
-
-[Link to demo video showing workflow execution + HITL pause/resume]
-
-**Key Features Demonstrated**:
-1. Agentic workflow execution
-2. ReAct reasoning loop
-3. Risk detection triggering HITL
-4. Human approval via HITL dashboard
-5. Workflow resumption after approval
-
----
-
 ## Documentation
 
 - **[MCP Implementation](./docs/mcp_implementation_summary.md)**: MCP server details
@@ -676,12 +651,6 @@ The project includes comprehensive evaluation of both pipelines:
 ## Contributing
 
 See [CONTRIBUTION_ATTESTATION.txt](./CONTRIBUTION_ATTESTATION.txt) for contribution guidelines.
-
----
-
-## License
-
-[Your License]
 
 ---
 
