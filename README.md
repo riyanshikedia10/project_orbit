@@ -19,7 +19,6 @@ Project Links:
 - [Application URL](https://project-orbit-streamlit-267172092995.us-central1.run.app/)
 - [Backend URL](https://project-orbit-api-267172092995.us-central1.run.app/)
 - [Codelabs URL](https://codelabs-preview.appspot.com/?file_id=1fJQ9WLgnQXVG3YemeyStNl_OwPcw3P26Czc2PUDOOlg)
-- [Video Link(Contains Demo)](https://drive.google.com/drive/folders/1uC8_yFrUPNdrogmC9K39u_j6KXZdEiel)
 - [HITL URL](https://project-orbit-hitl-267172092995.us-central1.run.app/)
 
 
@@ -585,28 +584,7 @@ This script:
 - [x] System diagram and architecture summary
 
 ---
-
-## Assignment 5 Deliverables
-
-### Phase 1: Agent Infrastructure
-- Lab 12: Core agent tools with Pydantic models
-- Lab 13: Supervisor Agent with ReAct pattern
-
-### Phase 2: MCP Integration
-- Lab 14: MCP Server with Tools/Resources/Prompts
-- Lab 15: Agent MCP consumption
-
-### Phase 3: Advanced Implementation
-- Lab 16: ReAct pattern with structured logging
-- Lab 17: Supervisory workflow pattern (graph-based)
-- Lab 18: HITL integration & visualization
-
-### Phase 4: Orchestration
-- Airflow DAGs integration
-- Containerization (Dockerfiles + docker-compose)
-- Configuration management (.env + config/)
-
----
+ f
 
 ## Tech Stack
 
