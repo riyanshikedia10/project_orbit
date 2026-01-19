@@ -584,7 +584,7 @@ This script:
 - [x] System diagram and architecture summary
 
 ---
- f
+ 
 
 ## Tech Stack
 
