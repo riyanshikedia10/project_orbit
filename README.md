@@ -626,15 +626,4 @@ The project includes comprehensive evaluation of both pipelines:
 - **ReAct Transparency**: Structured logging of reasoning steps
 - **Risk Detection**: Automated flagging of concerning signals
 
----
-
-## Contributing
-
-See [CONTRIBUTION_ATTESTATION.txt](./CONTRIBUTION_ATTESTATION.txt) for contribution guidelines.
-
----
-
-## Acknowledgments
-
-Built for DAMG 7245 - Assignment 5: Agentification and Secure Scaling of PE Intelligence using MCP
-
+ 
